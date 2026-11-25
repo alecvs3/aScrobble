@@ -34,6 +34,17 @@ afterEach(() => {
 });
 
 describe("fetchRecentlyPlayed", () => {
+  it("uses the Workers-supported manual redirect mode and rejects redirects", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+      expect(init?.redirect).toBe("manual");
+      return Response.redirect("https://example.com/", 302);
+    });
+
+    await expect(fetchRecentlyPlayed("dev", "user"))
+      .rejects.toThrow("Apple Music history returned HTTP 302");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("dedupes only a page-boundary duplicate", async () => {
     const page0 = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "X"];
     const page10 = ["X", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9"];

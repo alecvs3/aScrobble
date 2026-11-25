@@ -136,9 +136,17 @@ export default {
 
     if (url.pathname === "/trigger" && request.method === "POST") {
       try {
-        await pollAndScrobble(env, true);
+        const run = await pollAndScrobble(env, true);
         const ledger = await getStatus(env);
-        return json({ ok: true, triggered: true, ledger }, 200, corsHeaders);
+        const status = run.recovery_deferred && !ledger.pending_history_recovery
+          ? { ...ledger, history_recovery_notice: "Apple Music recovery will start on the next scheduled poll." }
+          : ledger;
+        return json({
+          ok: run.ok,
+          triggered: true,
+          ledger: status,
+          error: run.error_message,
+        }, 200, corsHeaders);
       } catch (err) {
         console.error("/trigger failed:", err);
         return json({ error: String(err) }, 500, corsHeaders);

@@ -1,7 +1,12 @@
 // src/apple.ts
 var API_BASE = "https://api.music.apple.com/v1";
 var PAGE_SIZE = 30;
-var MAX_OFFSET = 90;
+var RECENT_TRACKS_URL = `${API_BASE}/me/recent/played/tracks`;
+var HISTORY_TYPES = "songs,library-songs";
+var POLL_PAGES = 4;
+var RECOVERY_PAGES = 30;
+var MIN_CHECKPOINT_TRACKS = 5;
+var MAX_CHECKPOINT_TRACKS = 8;
 var TokenExpiredError = class extends Error {
   constructor() {
     super(
@@ -19,74 +24,147 @@ function normalizeAlbumName(rawAlbum) {
   if (!rawAlbum) return "";
   return rawAlbum.replace(/ - (EP|Single)$/i, "").trim();
 }
-async function fetchTrackPlayCount(devToken, musicUserToken, isrc) {
-  const url = `${API_BASE}/me/library/songs?filter[isrc]=${encodeURIComponent(isrc)}&fields[library-songs]=playCount&limit=1`;
-  const headers = {
+function trackFromItem(item) {
+  const attrs = item.attributes ?? {};
+  return {
+    id: item.id,
+    name: attrs.name ?? "",
+    artist: attrs.artistName ?? "",
+    album_artist: attrs.albumArtistName ?? attrs.artistName ?? "",
+    album: normalizeAlbumName(attrs.albumName ?? ""),
+    duration_ms: attrs.durationInMillis ?? 18e4,
+    isrc: attrs.isrc,
+    ...item.type === "library-songs" ? { library: true } : {}
+  };
+}
+async function fetchHistoryPage(url, headers, probingOffset = false) {
+  const response = await fetch(url, { headers, redirect: "manual" });
+  if (response.status === 401) throw new TokenExpiredError();
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (probingOffset && (response.status === 400 || response.status === 404)) return { data: [] };
+    throw new Error(`Apple Music history returned HTTP ${response.status}`);
+  }
+  const page = await response.json();
+  if (!Array.isArray(page.data)) throw new Error("Apple Music history response has no track list");
+  return page;
+}
+function historyUrl(offset) {
+  const url = new URL(RECENT_TRACKS_URL);
+  url.searchParams.set("limit", String(PAGE_SIZE));
+  url.searchParams.set("offset", String(offset));
+  url.searchParams.set("types", HISTORY_TYPES);
+  return url;
+}
+function historyHeaders(devToken, musicUserToken) {
+  return {
     Authorization: `Bearer ${devToken}`,
     "Music-User-Token": musicUserToken,
     ...SPOOFED_HEADERS
   };
-  try {
-    const response = await fetch(url, { headers });
-    if (!response.ok) return null;
-    const json2 = await response.json();
-    const count = json2.data?.[0]?.attributes?.playCount;
-    return typeof count === "number" ? count : null;
-  } catch {
-    return null;
-  }
 }
 async function fetchRecentlyPlayed(devToken, musicUserToken) {
   const tracks = [];
-  const headers = {
-    Authorization: `Bearer ${devToken}`,
-    "Music-User-Token": musicUserToken,
-    ...SPOOFED_HEADERS
-  };
-  for (let offset = 0; offset <= MAX_OFFSET; offset += PAGE_SIZE) {
-    const url = `${API_BASE}/me/recent/played/tracks?limit=${PAGE_SIZE}&offset=${offset}`;
-    let response;
-    try {
-      response = await fetch(url, { headers });
-    } catch (e) {
-      console.warn(`Apple fetch failed at offset ${offset}:`, e);
-      break;
-    }
-    if (response.status === 401) throw new TokenExpiredError();
-    if (!response.ok) {
-      const body = await response.text();
-      console.warn(
-        `Apple API ${response.status} at offset ${offset}: ${body.slice(0, 200)}`
-      );
-      break;
-    }
-    const json2 = await response.json();
-    const items = json2.data ?? [];
-    if (items.length === 0) break;
-    for (const item of items) {
-      if (!item.id) continue;
-      const attrs = item.attributes ?? {};
-      const rawAlbum = attrs.albumName ?? "";
-      tracks.push({
-        id: item.id,
-        name: attrs.name ?? "",
-        artist: attrs.artistName ?? "",
-        album_artist: attrs.albumArtistName ?? attrs.artistName ?? "",
-        album: normalizeAlbumName(rawAlbum),
-        duration_ms: attrs.durationInMillis ?? 18e4,
-        isrc: attrs.isrc
-      });
-    }
+  const headers = historyHeaders(devToken, musicUserToken);
+  for (let page = 0; page < POLL_PAGES; page++) {
+    const { data: items } = await fetchHistoryPage(historyUrl(page * PAGE_SIZE), headers, page > 0);
+    const previousId = tracks.at(-1)?.id;
+    tracks.push(...items.filter((item, index) => item.id && (index > 0 || item.id !== previousId)).map(trackFromItem));
     if (items.length < PAGE_SIZE) break;
   }
-  const deduped = [];
-  for (let i = 0; i < tracks.length; i++) {
-    if (i > 0 && i % PAGE_SIZE === 0 && tracks[i - 1].id === tracks[i].id) {
-      continue;
-    }
-    deduped.push(tracks[i]);
+  return tracks;
+}
+function historyTrackKey(artist, track) {
+  const normalize = (value) => value.normalize("NFKC").toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim();
+  return JSON.stringify([normalize(artist), normalize(track)]);
+}
+function nextHistoryPage(url, page) {
+  const offset = Number(url.searchParams.get("offset") ?? 0);
+  if (!page.next) {
+    return page.data.length === PAGE_SIZE ? historyUrl(offset + PAGE_SIZE) : null;
   }
-  return deduped;
+  const next = new URL(page.next, url);
+  const nextOffset = Number(next.searchParams.get("offset"));
+  if (next.origin !== url.origin || next.pathname !== url.pathname || !Number.isSafeInteger(nextOffset) || nextOffset !== offset + page.data.length) {
+    throw new Error("Apple Music returned an invalid history continuation");
+  }
+  next.searchParams.set("limit", String(PAGE_SIZE));
+  next.searchParams.set("types", HISTORY_TYPES);
+  return next;
+}
+async function fetchRecoveryHistory(devToken, musicUserToken, checkpoint) {
+  const metadata = checkpoint.identity === "track-metadata";
+  const anchor = checkpoint.keys.slice(0, metadata ? MIN_CHECKPOINT_TRACKS : MAX_CHECKPOINT_TRACKS);
+  const matchesAt = (keys2, index) => anchor.every((key, offset) => keys2[index + offset] === key);
+  const shortCheckpoint = anchor.length < MIN_CHECKPOINT_TRACKS || new Set(anchor).size < 3;
+  const repeatedCheckpoint = !shortCheckpoint && checkpoint.keys.some((_, index) => index > 0 && matchesAt(checkpoint.keys, index));
+  const headers = historyHeaders(devToken, musicUserToken);
+  const firstUrl = historyUrl(0);
+  const tracks = [];
+  const keys = [];
+  const keyPositions = [];
+  const result = { snapshot: [], checked: 0, matchLength: anchor.length, missing: null };
+  const pageSignatures = /* @__PURE__ */ new Set();
+  let url = firstUrl;
+  let firstPageSignature = "";
+  let nextMatchIndex = 0;
+  let matchIndex = -1;
+  let ambiguous = repeatedCheckpoint;
+  let probingOffset = false;
+  let pagesWithTracks = 0;
+  for (let page = 0; url && page < RECOVERY_PAGES; page++) {
+    const response = await fetchHistoryPage(url, headers, probingOffset);
+    const items = response.data;
+    const signature = JSON.stringify(items.map((item) => item.id));
+    if (page === 0) firstPageSignature = signature;
+    if (probingOffset && !response.next && pageSignatures.has(signature) || items.length === 0) {
+      url = null;
+      break;
+    }
+    pageSignatures.add(signature);
+    pagesWithTracks++;
+    for (const item of items) {
+      const track = trackFromItem(item);
+      tracks.push(track);
+      if (checkpoint.catalogOnly && track.library) continue;
+      keys.push(metadata ? historyTrackKey(track.artist, track.name) : track.id);
+      keyPositions.push(tracks.length - 1);
+    }
+    if (!shortCheckpoint && !ambiguous) {
+      for (; nextMatchIndex + anchor.length <= keys.length; nextMatchIndex++) {
+        if (!matchesAt(keys, nextMatchIndex)) continue;
+        if (matchIndex !== -1) {
+          ambiguous = true;
+          break;
+        }
+        matchIndex = keyPositions[nextMatchIndex];
+      }
+    }
+    if (tracks.length >= POLL_PAGES * PAGE_SIZE && (shortCheckpoint || ambiguous || matchIndex !== -1)) break;
+    url = nextHistoryPage(url, response);
+    probingOffset = !response.next;
+  }
+  result.snapshot = tracks.slice(0, POLL_PAGES * PAGE_SIZE).filter((track) => track.id);
+  result.checked = tracks.length;
+  if (result.snapshot.length === 0) throw new Error("Apple Music returned an empty recovery history");
+  if (!shortCheckpoint && !ambiguous && pagesWithTracks > 1) {
+    const head = await fetchHistoryPage(firstUrl, headers);
+    if (JSON.stringify(head.data.map((item) => item.id)) !== firstPageSignature) {
+      throw new Error("Apple Music history shifted during recovery");
+    }
+  }
+  if (shortCheckpoint) result.reason = "checkpoint was too short";
+  else if (ambiguous) result.reason = "checkpoint was ambiguous";
+  else if (matchIndex === -1) result.reason = url ? "search limit reached" : "history ended";
+  else result.missing = tracks.slice(0, newerThanCheckpoint(tracks, matchIndex, checkpoint.catalogOnly)).filter((track) => track.id);
+  return result;
+}
+function newerThanCheckpoint(tracks, matchIndex, catalogOnly) {
+  if (!catalogOnly) return matchIndex;
+  for (let index = matchIndex - 1; index >= 0; index--) {
+    if (!tracks[index].library) return index + 1;
+  }
+  return 0;
 }
 
 // src/detect.ts
@@ -348,33 +426,40 @@ function md5(text) {
 
 // src/lastfm.ts
 var API_URL = "https://ws.audioscrobbler.com/2.0/";
-var BATCH_SIZE = 50;
+var LASTFM_BATCH_SIZE = 50;
 function signParams(params, sharedSecret) {
   const sigString = Object.keys(params).filter((k) => k !== "format" && k !== "callback").sort().map((k) => `${k}${params[k]}`).join("") + sharedSecret;
   return md5(sigString);
 }
 async function scrobbleBatch(plays, apiKey, sharedSecret, sessionKey) {
-  const result = { accepted: 0, ignored: 0, errors: 0 };
+  const result = { accepted: 0, acceptedIndexes: [], failedIndexes: [], ignored: 0, errors: 0 };
   if (plays.length === 0) return result;
-  for (let chunkStart = 0; chunkStart < plays.length; chunkStart += BATCH_SIZE) {
-    const chunk = plays.slice(chunkStart, chunkStart + BATCH_SIZE);
+  for (let chunkStart = 0; chunkStart < plays.length; chunkStart += LASTFM_BATCH_SIZE) {
+    const chunk = plays.slice(chunkStart, chunkStart + LASTFM_BATCH_SIZE);
     const params = {
       method: "track.scrobble",
       api_key: apiKey,
       sk: sessionKey
     };
+    const submittedIndexes = [];
     chunk.forEach((play, i) => {
-      if (!play.artist || !play.track) return;
-      params[`artist[${i}]`] = play.artist;
-      params[`track[${i}]`] = play.track;
-      params[`timestamp[${i}]`] = Math.floor(
+      if (!play.artist || !play.track) {
+        result.ignored++;
+        return;
+      }
+      const position = submittedIndexes.length;
+      submittedIndexes.push(chunkStart + i);
+      params[`artist[${position}]`] = play.artist;
+      params[`track[${position}]`] = play.track;
+      params[`timestamp[${position}]`] = Math.floor(
         play.timestamp.getTime() / 1e3
       ).toString();
-      if (play.album) params[`album[${i}]`] = play.album;
+      if (play.album) params[`album[${position}]`] = play.album;
       if (play.duration_ms) {
-        params[`duration[${i}]`] = Math.floor(play.duration_ms / 1e3).toString();
+        params[`duration[${position}]`] = Math.floor(play.duration_ms / 1e3).toString();
       }
     });
+    if (submittedIndexes.length === 0) continue;
     params.api_sig = signParams(params, sharedSecret);
     params.format = "json";
     const body = new URLSearchParams(params);
@@ -387,13 +472,15 @@ async function scrobbleBatch(plays, apiKey, sharedSecret, sessionKey) {
       });
     } catch (e) {
       console.error("Last.fm HTTP error:", e);
-      result.errors += chunk.length;
+      result.errors += submittedIndexes.length;
+      result.failedIndexes.push(...submittedIndexes);
       continue;
     }
     if (!response.ok) {
       const text = await response.text();
       console.error(`Last.fm ${response.status}: ${text.slice(0, 300)}`);
-      result.errors += chunk.length;
+      result.errors += submittedIndexes.length;
+      result.failedIndexes.push(...submittedIndexes);
       continue;
     }
     let json2;
@@ -401,16 +488,33 @@ async function scrobbleBatch(plays, apiKey, sharedSecret, sessionKey) {
       json2 = await response.json();
     } catch {
       console.error("Last.fm non-JSON response");
-      result.errors += chunk.length;
+      result.errors += submittedIndexes.length;
+      result.failedIndexes.push(...submittedIndexes);
       continue;
     }
-    const attr = json2?.scrobbles?.["@attr"] ?? {};
-    result.accepted += parseInt(attr.accepted ?? "0", 10);
-    result.ignored += parseInt(attr.ignored ?? "0", 10);
-    if (parseInt(attr.ignored ?? "0", 10) > 0) {
-      let scrobbleList = json2?.scrobbles?.scrobble ?? [];
-      if (!Array.isArray(scrobbleList)) scrobbleList = [scrobbleList];
-      for (const s of scrobbleList) {
+    const attr = json2?.scrobbles?.["@attr"];
+    const accepted = Number(attr?.accepted);
+    const ignored = Number(attr?.ignored);
+    if (!Number.isInteger(accepted) || !Number.isInteger(ignored) || accepted < 0 || ignored < 0 || accepted + ignored !== submittedIndexes.length) {
+      console.error("Last.fm returned an unexpected scrobble receipt", json2?.error);
+      result.errors += submittedIndexes.length;
+      result.failedIndexes.push(...submittedIndexes);
+      continue;
+    }
+    result.accepted += accepted;
+    result.ignored += ignored;
+    const entries = json2.scrobbles.scrobble;
+    const scrobbles = Array.isArray(entries) ? entries : entries ? [entries] : [];
+    if (ignored === 0) {
+      result.acceptedIndexes.push(...submittedIndexes);
+    } else if (scrobbles.length === submittedIndexes.length) {
+      const confirmedIndexes = submittedIndexes.filter(
+        (_, index) => String(scrobbles[index]?.ignoredMessage?.code) === "0"
+      );
+      if (confirmedIndexes.length === accepted) result.acceptedIndexes.push(...confirmedIndexes);
+    }
+    if (ignored > 0) {
+      for (const s of scrobbles) {
         const msg = s?.ignoredMessage ?? {};
         if (msg.code && msg.code !== "0") {
           console.warn(
@@ -425,7 +529,7 @@ async function scrobbleBatch(plays, apiKey, sharedSecret, sessionKey) {
 
 // src/listenbrainz.ts
 var API_URL2 = "https://api.listenbrainz.org/1/submit-listens";
-var BATCH_SIZE2 = 100;
+var BATCH_SIZE = 100;
 async function submitBatch(plays, userToken) {
   const result = { accepted: 0, errors: 0 };
   if (plays.length === 0) return result;
@@ -443,8 +547,8 @@ async function submitBatch(plays, userToken) {
       }
     }
   }));
-  for (let chunkStart = 0; chunkStart < entries.length; chunkStart += BATCH_SIZE2) {
-    const chunk = entries.slice(chunkStart, chunkStart + BATCH_SIZE2);
+  for (let chunkStart = 0; chunkStart < entries.length; chunkStart += BATCH_SIZE) {
+    const chunk = entries.slice(chunkStart, chunkStart + BATCH_SIZE);
     const body = {
       listen_type: chunk.length === 1 ? "single" : "import",
       payload: chunk
@@ -569,8 +673,8 @@ async function loadLedger(kv) {
   return MEMORY_LEDGER_CACHE ?? { ...DEFAULT_LEDGER };
 }
 async function saveLedger(kv, ledger) {
-  MEMORY_LEDGER_CACHE = ledger;
   await kv.put(LEDGER_KEY, JSON.stringify(ledger));
+  MEMORY_LEDGER_CACHE = ledger;
 }
 function addRecentScrobbles(ledger, plays) {
   const newEntries = plays.map((p) => ({
@@ -600,6 +704,8 @@ var CB_ERROR_THRESHOLD = 5;
 var CB_BASE_COOLDOWN_MS = 30 * 60 * 1e3;
 var CB_INSTANT_TRIP_ERRORS = /* @__PURE__ */ new Set(["apple_token_expired", "apple_tokens_missing_in_kv"]);
 var CB_MAX_COOLDOWN_MS = 2 * 60 * 60 * 1e3;
+var HISTORY_GAP_MS = 45 * 60 * 1e3;
+var RECOVERY_WINDOW_MS = 13 * 24 * 60 * 60 * 1e3;
 var DEDUP_WINDOW_MS = 30 * 1e3;
 var DEDUP_MAX_ENTRIES = 200;
 function isCircuitOpen(ledger, now) {
@@ -639,6 +745,143 @@ function recordScrobbled(ledger, trackId, now) {
   if (!ledger.recent_scrobble_ids) ledger.recent_scrobble_ids = [];
   ledger.recent_scrobble_ids.push(dedupKey(trackId, now));
 }
+function hasAppleHistoryError(ledger) {
+  const error = ledger.stats.last_error_message ?? "";
+  return CB_INSTANT_TRIP_ERRORS.has(error) || error.startsWith("apple_api_error:");
+}
+function findHistoryCheckpoint(ledger, startedAt) {
+  const interrupted = ledger.apple_history_interrupted !== false && (ledger.apple_history_interrupted === true || hasAppleHistoryError(ledger));
+  const lastPoll = Date.parse(ledger.snapshot_poll_iso ?? ledger.last_run_iso ?? "");
+  if (ledger.previous_recent.length > 0) {
+    if (!interrupted && !(startedAt - lastPoll > HISTORY_GAP_MS)) return null;
+    const checkpointTime2 = Date.parse(ledger.snapshot_poll_iso ?? ledger.stats.last_success_iso ?? "");
+    return {
+      keys: ledger.previous_recent.map((track) => track.id),
+      identity: "apple-id",
+      capturedAt: Number.isFinite(checkpointTime2) ? new Date(checkpointTime2) : null,
+      catalogOnly: !ledger.library_history_since_iso
+    };
+  }
+  if (!interrupted || ledger.recent_scrobbles.length === 0) return null;
+  const recent = ledger.recent_scrobbles.filter((play) => play.artist && play.track).sort((left, right) => Date.parse(right.timestamp_iso) - Date.parse(left.timestamp_iso)).slice(0, 12);
+  const checkpointTime = Date.parse(recent[0]?.timestamp_iso ?? "");
+  const libraryHistorySince = Date.parse(ledger.library_history_since_iso ?? "");
+  return {
+    keys: recent.map((play) => historyTrackKey(play.artist, play.track)),
+    identity: "track-metadata",
+    capturedAt: Number.isFinite(checkpointTime) ? new Date(checkpointTime) : null,
+    // Scrobbles from before library plays were read can't be matched against them.
+    catalogOnly: !Number.isFinite(libraryHistorySince) || recent.slice(0, 5).some((play) => Date.parse(play.timestamp_iso) < libraryHistorySince)
+  };
+}
+function noPlays(startedAt) {
+  return {
+    ok: true,
+    detected: 0,
+    accepted: 0,
+    ignored: 0,
+    errors: 0,
+    repeat_count: 0,
+    elapsed_ms: Date.now() - startedAt
+  };
+}
+function toPayload(play) {
+  return {
+    artist: play.track.artist,
+    track: play.track.name,
+    album: play.track.album,
+    timestamp: play.timestamp,
+    duration_ms: play.track.duration_ms
+  };
+}
+async function stageHistoryRecovery(env, ledger, recovery, checkpoint, runTime, startedAt) {
+  const plays = (recovery.missing ?? []).filter((track) => track.artist && track.name).reverse().map((track) => ({ track, kind: "new" }));
+  ledger.previous_recent = recovery.snapshot;
+  ledger.library_history_since_iso ??= runTime.toISOString();
+  ledger.snapshot_poll_iso = runTime.toISOString();
+  ledger.stats.last_success_iso = runTime.toISOString();
+  ledger.last_save_iso = runTime.toISOString();
+  ledger.apple_history_interrupted = void 0;
+  ledger.stationary_idle = false;
+  ledger.handled_count = 1;
+  ledger.position0_elapsed_sec = 0;
+  if (recovery.missing === null) {
+    ledger.history_recovery_notice = `Couldn\u2019t match the saved Apple Music history after checking ${recovery.checked} tracks (${recovery.reason}). Normal scrobbling has resumed.`;
+    addLogEntry(ledger, "history_recovery_unmatched", ledger.history_recovery_notice, "warn");
+  } else if (plays.length === 0) {
+    ledger.history_recovery_notice = "Matched the saved Apple Music history. No new plays were found.";
+    addLogEntry(ledger, "history_recovery_complete", ledger.history_recovery_notice, "info");
+  } else if (!checkpoint.capturedAt || startedAt - checkpoint.capturedAt.getTime() >= RECOVERY_WINDOW_MS) {
+    ledger.history_recovery_notice = `Found ${plays.length} newer Apple Music entries. Their play dates are unavailable, and the checkpoint is outside Last.fm\u2019s backfill window or lacks a date. Normal scrobbling has resumed.`;
+    addLogEntry(ledger, "history_recovery_preview", ledger.history_recovery_notice, "warn");
+  } else if (checkpoint.identity === "track-metadata") {
+    ledger.history_recovery_notice = `Found ${plays.length} newer Apple Music entries by matching the scrobble log. The original Apple Music checkpoint is missing. Normal scrobbling has resumed.`;
+    addLogEntry(ledger, "history_recovery_preview", ledger.history_recovery_notice, "warn");
+  } else {
+    const timestamped = assignTimestamps(plays, runTime, checkpoint.capturedAt);
+    ledger.pending_history_recovery = {
+      plays: timestamped.map((play) => ({
+        track: play.track,
+        timestamp_iso: play.timestamp.toISOString()
+      })),
+      source: "recovery",
+      total: timestamped.length,
+      accepted: 0,
+      ignored: 0
+    };
+    ledger.history_recovery_notice = `Matched ${recovery.matchLength} consecutive tracks in Apple Music. Queued ${timestamped.length} plays with estimated timestamps.`;
+    addLogEntry(ledger, "history_recovery_queued", ledger.history_recovery_notice, "success");
+  }
+  await saveLedger(env.ASCROBBLE_STATE, ledger);
+  return { ...noPlays(startedAt), detected: plays.length };
+}
+async function submitHistoryRecovery(env, ledger, pending, runTime, startedAt) {
+  const batch = pending.plays.slice(0, LASTFM_BATCH_SIZE);
+  const retry = pending.source === "retry";
+  const plays = batch.map((play) => ({
+    track: play.track,
+    kind: play.kind ?? "new",
+    timestamp: new Date(play.timestamp_iso)
+  }));
+  const payload = plays.map(toPayload);
+  const result = await scrobbleBatch(payload, env.LASTFM_API_KEY, env.LASTFM_SHARED_SECRET, env.LASTFM_SESSION_KEY);
+  if (result.errors > 0) {
+    ledger.history_recovery_notice = retry ? `Last.fm still hasn\u2019t confirmed ${pending.plays.length} queued plays. They\u2019ll be retried.` : `Last.fm didn\u2019t confirm the latest recovery batch. ${pending.plays.length} plays are still queued for retry.`;
+    addLogEntry(ledger, "history_recovery_retry", ledger.history_recovery_notice, "warn");
+    return failRun(env, ledger, runTime, startedAt, "history_recovery_submit_failed");
+  }
+  if (env.LISTENBRAINZ_TOKEN && !retry) {
+    const listenBrainz = await submitBatch(payload, env.LISTENBRAINZ_TOKEN);
+    if (listenBrainz.errors > 0) {
+      addLogEntry(ledger, "listenbrainz_recovery_error", `ListenBrainz recovery batch had ${listenBrainz.errors} errors.`, "warn");
+    }
+  }
+  pending.plays = pending.plays.slice(batch.length);
+  pending.accepted += result.accepted;
+  pending.ignored += result.ignored;
+  const oldTotal = ledger.stats.total_scrobbled;
+  ledger.stats.total_scrobbled += result.accepted;
+  addRecentScrobbles(ledger, result.acceptedIndexes.map((index) => plays[index]));
+  resetCircuit(ledger);
+  ledger.stats.last_error_message = null;
+  ledger.stats.last_error_iso = null;
+  ledger.last_save_iso = runTime.toISOString();
+  const count = `${pending.accepted} of ${pending.total} plays added to Last.fm`;
+  const ignored = pending.ignored > 0 ? `, ${pending.ignored} ignored` : "";
+  if (pending.plays.length > 0) {
+    ledger.history_recovery_notice = retry ? `Resending plays Last.fm missed. ${count}, ${pending.plays.length} still queued.` : `Recovering Apple Music history. ${count}, ${pending.plays.length} still queued.`;
+  } else {
+    ledger.pending_history_recovery = void 0;
+    ledger.history_recovery_notice = retry ? `Resent plays Last.fm missed. ${count}${ignored}.` : `Apple Music recovery finished. ${count}${ignored}. Timestamps are estimated.`;
+  }
+  addLogEntry(ledger, "history_recovery_batch", ledger.history_recovery_notice, "success");
+  await saveLedger(env.ASCROBBLE_STATE, ledger);
+  await notifySummary(env.NOTIFY_WEBHOOK_URL, result.accepted, 0, result.ignored);
+  if (Math.floor(oldTotal / 1e3) < Math.floor(ledger.stats.total_scrobbled / 1e3)) {
+    await notifyMilestone(env.NOTIFY_WEBHOOK_URL, Math.floor(ledger.stats.total_scrobbled / 1e3) * 1e3);
+  }
+  return { ...noPlays(startedAt), detected: batch.length, accepted: result.accepted, ignored: result.ignored };
+}
 async function failRun(env, ledger, runTime, startedAt, errorMessage, instantTrip = false) {
   ledger.stats.total_errors += 1;
   ledger.stats.last_error_iso = runTime.toISOString();
@@ -664,7 +907,20 @@ async function failRun(env, ledger, runTime, startedAt, errorMessage, instantTri
 async function pollAndScrobble(env, isManual = false) {
   const startedAt = Date.now();
   const runTime = new Date(startedAt);
-  const ledger = await loadLedger(env.ASCROBBLE_STATE);
+  const loadedLedger = await loadLedger(env.ASCROBBLE_STATE);
+  const recoveryCheckpoint = findHistoryCheckpoint(loadedLedger, startedAt);
+  const recovering = recoveryCheckpoint !== null;
+  const recoveryActive = recovering || loadedLedger.pending_history_recovery !== void 0;
+  if (recoveryActive && isManual) {
+    if (isCircuitOpen(loadedLedger, startedAt)) {
+      const ledger2 = structuredClone(loadedLedger);
+      ledger2.apple_history_interrupted ||= recovering;
+      resetCircuit(ledger2);
+      await saveLedger(env.ASCROBBLE_STATE, ledger2);
+    }
+    return { ...noPlays(startedAt), recovery_deferred: true };
+  }
+  const ledger = recoveryActive ? structuredClone(loadedLedger) : loadedLedger;
   const lastRunTime = parseLastRunTime(ledger);
   ledger.stats.total_runs += 1;
   ledger.last_run_iso = runTime.toISOString();
@@ -697,12 +953,16 @@ async function pollAndScrobble(env, isManual = false) {
       circuit_open: true
     };
   }
+  if (ledger.pending_history_recovery) {
+    return submitHistoryRecovery(env, ledger, ledger.pending_history_recovery, runTime, startedAt);
+  }
   addLogEntry(ledger, "kv_token_read", "Reading Apple dev + user tokens from Cloudflare KV...", "info");
   const [appleDevToken, appleUserToken] = await Promise.all([
     env.ASCROBBLE_STATE.get(KV_KEY_APPLE_DEV_TOKEN),
     env.ASCROBBLE_STATE.get(KV_KEY_APPLE_USER_TOKEN)
   ]);
   if (!appleDevToken || !appleUserToken) {
+    if (ledger.apple_history_interrupted !== false) ledger.apple_history_interrupted = true;
     const msg = "apple_tokens_missing_in_kv";
     console.error(
       `${msg}: expected keys ${KV_KEY_APPLE_DEV_TOKEN} and ${KV_KEY_APPLE_USER_TOKEN}`
@@ -721,9 +981,15 @@ async function pollAndScrobble(env, isManual = false) {
   addLogEntry(ledger, "kv_token_ok", "Apple tokens found in KV \u2713", "info");
   addLogEntry(ledger, "apple_fetch_start", "Calling Apple Music /v1/me/recent/played/tracks...", "info");
   let current;
+  let recovery;
   try {
-    current = await fetchRecentlyPlayed(appleDevToken, appleUserToken);
+    recovery = recoveryCheckpoint ? await fetchRecoveryHistory(appleDevToken, appleUserToken, recoveryCheckpoint) : void 0;
+    current = recovery?.snapshot ?? await fetchRecentlyPlayed(appleDevToken, appleUserToken);
+    if (current.length === 0 && ledger.previous_recent.length > 0) {
+      throw new Error("Apple Music returned an empty history after a saved checkpoint");
+    }
   } catch (e) {
+    if (ledger.apple_history_interrupted !== false) ledger.apple_history_interrupted = true;
     if (e instanceof TokenExpiredError) {
       console.error("Apple token expired \u2014 tripping circuit breaker");
       addLogEntry(ledger, "apple_token_expired", "Apple Music token returned 401 \u2014 circuit tripped", "error");
@@ -746,12 +1012,18 @@ async function pollAndScrobble(env, isManual = false) {
   resetCircuit(ledger);
   ledger.stats.last_error_message = null;
   ledger.stats.last_error_iso = null;
+  if (recovery && recoveryCheckpoint) {
+    return stageHistoryRecovery(env, ledger, recovery, recoveryCheckpoint, runTime, startedAt);
+  }
   console.log(`Apple returned ${current.length} tracks`);
   addLogEntry(ledger, "apple_fetch_success", `Fetched ${current.length} recently played tracks from Apple API`, "info");
   if (ledger.previous_recent.length === 0) {
     console.log(`First run \u2014 snapshotting ${current.length} tracks without scrobbling`);
     addLogEntry(ledger, "bootstrap_snapshot", `Snapshotting ${current.length} tracks on initial run`, "info");
     ledger.previous_recent = current;
+    ledger.library_history_since_iso ??= runTime.toISOString();
+    ledger.snapshot_poll_iso = runTime.toISOString();
+    ledger.apple_history_interrupted = void 0;
     ledger.stats.last_success_iso = runTime.toISOString();
     await saveLedger(env.ASCROBBLE_STATE, ledger);
     return {
@@ -770,37 +1042,17 @@ async function pollAndScrobble(env, isManual = false) {
     handledCount: ledger.handled_count ?? 1,
     position0ElapsedSec: ledger.position0_elapsed_sec ?? 0
   };
-  const detection = detectPlays(current, ledger.previous_recent, elapsedSeconds, prevState);
+  const upgradingSnapshot = !ledger.library_history_since_iso;
+  if (upgradingSnapshot) {
+    ledger.library_history_since_iso = runTime.toISOString();
+    addLogEntry(ledger, "history_library_enabled", "Now reading plays from your Apple Music library too", "info");
+  }
+  const comparable = upgradingSnapshot ? current.filter((track) => !track.library) : current;
+  const detection = detectPlays(comparable, ledger.previous_recent, elapsedSeconds, prevState);
   const plays = detection.plays;
   ledger.stationary_idle = detection.newState.stationaryIdle;
   ledger.handled_count = detection.newState.handledCount;
   ledger.position0_elapsed_sec = detection.newState.position0ElapsedSec;
-  if (plays.length === 0 && current.length > 0 && ledger.previous_recent.length > 0) {
-    const topTrack = current[0];
-    const prevTopTrack = ledger.previous_recent[0];
-    if (topTrack.id === prevTopTrack.id && topTrack.isrc) {
-      const newCount = await fetchTrackPlayCount(appleDevToken, appleUserToken, topTrack.isrc);
-      if (newCount !== null) {
-        const prevCount = ledger.top_track_id === topTrack.id ? ledger.top_track_play_count : void 0;
-        if (prevCount !== void 0 && newCount > prevCount) {
-          const delta = newCount - prevCount;
-          console.log(
-            `Position-0 probe: play count for "${topTrack.name}" rose by ${delta} \u2014 emitting ${delta} silent repeat(s)`
-          );
-          addLogEntry(ledger, "repeat_probe_detected", `Library playCount rose by ${delta} for "${topTrack.name}"`, "success");
-          for (let i = 0; i < delta; i++) {
-            plays.push({ track: topTrack, kind: "repeat" });
-          }
-          ledger.stationary_idle = false;
-        }
-        ledger.top_track_id = topTrack.id;
-        ledger.top_track_play_count = newCount;
-      }
-    } else {
-      ledger.top_track_id = current[0]?.id;
-      ledger.top_track_play_count = void 0;
-    }
-  }
   pruneDedup(ledger, startedAt);
   const deduped = plays.filter((p) => {
     const trackId = p.track.id;
@@ -815,10 +1067,11 @@ async function pollAndScrobble(env, isManual = false) {
   if (deduped.length === 0) {
     console.log("No new plays");
     ledger.previous_recent = current;
+    ledger.snapshot_poll_iso = runTime.toISOString();
     const topTrackName = current[0]?.name ?? "None";
     addLogEntry(ledger, "poll_idle", `Checked ${current.length} Apple tracks \u2014 0 new plays. Latest track in history: "${topTrackName}"`, "info");
     const lastSaveTime = ledger.last_save_iso ? new Date(ledger.last_save_iso).getTime() : 0;
-    const shouldSave = !ledger.last_save_iso || startedAt - lastSaveTime >= 5 * 60 * 1e3;
+    const shouldSave = upgradingSnapshot || !ledger.last_save_iso || startedAt - lastSaveTime >= 5 * 60 * 1e3;
     if (shouldSave) {
       ledger.last_save_iso = runTime.toISOString();
       await saveLedger(env.ASCROBBLE_STATE, ledger);
@@ -842,13 +1095,7 @@ async function pollAndScrobble(env, isManual = false) {
       `  [${p.kind}] ${p.track.artist} \u2014 ${p.track.name} @ ${p.timestamp?.toISOString()}`
     );
   }
-  const payload = timestamped.map((p) => ({
-    artist: p.track.artist,
-    track: p.track.name,
-    album: p.track.album,
-    timestamp: p.timestamp,
-    duration_ms: p.track.duration_ms
-  }));
+  const payload = timestamped.map(toPayload);
   addLogEntry(ledger, "lastfm_submit_start", `Submitting ${payload.length} scrobble(s) to Last.fm...`, "info");
   let lfmResult = await scrobbleBatch(
     payload,
@@ -886,6 +1133,22 @@ async function pollAndScrobble(env, isManual = false) {
       addLogEntry(ledger, "circuit_tripped", `Circuit breaker tripped after ${CB_ERROR_THRESHOLD} consecutive errors`, "error");
     }
   }
+  const failedPlays = lfmResult.failedIndexes.map((index) => timestamped[index]);
+  if (failedPlays.length > 0) {
+    ledger.pending_history_recovery = {
+      plays: failedPlays.map((play) => ({
+        track: play.track,
+        timestamp_iso: play.timestamp.toISOString(),
+        kind: play.kind
+      })),
+      source: "retry",
+      total: failedPlays.length,
+      accepted: 0,
+      ignored: 0
+    };
+    ledger.history_recovery_notice = `Last.fm didn\u2019t confirm ${failedPlays.length} play(s). They\u2019re queued and will be resent.`;
+    addLogEntry(ledger, "lastfm_retry_queued", ledger.history_recovery_notice, "warn");
+  }
   if (env.LISTENBRAINZ_TOKEN) {
     addLogEntry(ledger, "listenbrainz_submit", "Also submitting to ListenBrainz...", "info");
     const lbResult = await submitBatch(payload, env.LISTENBRAINZ_TOKEN);
@@ -911,8 +1174,9 @@ async function pollAndScrobble(env, isManual = false) {
     const trackId = p.track.id;
     if (trackId) recordScrobbled(ledger, trackId, startedAt);
   }
-  addRecentScrobbles(ledger, timestamped);
+  addRecentScrobbles(ledger, lfmResult.acceptedIndexes.map((index) => timestamped[index]));
   ledger.previous_recent = current;
+  ledger.snapshot_poll_iso = runTime.toISOString();
   ledger.stats.total_scrobbled = newTotal;
   ledger.stats.last_success_iso = runTime.toISOString();
   if (lfmResult.accepted > 0) {
@@ -928,11 +1192,12 @@ async function pollAndScrobble(env, isManual = false) {
   );
   await saveLedger(env.ASCROBBLE_STATE, ledger);
   return {
-    ok: true,
+    ok: lfmResult.errors === 0,
     detected: deduped.length,
     accepted: lfmResult.accepted,
     ignored: lfmResult.ignored,
     errors: lfmResult.errors,
+    error_message: lfmResult.errors > 0 ? "Last.fm could not confirm every play in the poll." : void 0,
     repeat_count: repeatCount,
     elapsed_ms: Date.now() - startedAt
   };
@@ -942,6 +1207,9 @@ async function getStatus(env) {
 }
 async function resetLedgerStats(env) {
   const ledger = await loadLedger(env.ASCROBBLE_STATE);
+  if (ledger.apple_history_interrupted !== false && hasAppleHistoryError(ledger)) {
+    ledger.apple_history_interrupted = true;
+  }
   ledger.stats.total_errors = 0;
   ledger.stats.last_error_message = null;
   ledger.stats.last_error_iso = null;
@@ -961,6 +1229,9 @@ async function updateTokens(env, appleDevToken, appleUserToken) {
     updated.push(KV_KEY_APPLE_USER_TOKEN);
   }
   const ledger = await loadLedger(env.ASCROBBLE_STATE);
+  if (ledger.apple_history_interrupted !== false && hasAppleHistoryError(ledger)) {
+    ledger.apple_history_interrupted = true;
+  }
   resetCircuit(ledger);
   ledger.stats.last_error_message = null;
   ledger.stats.last_error_iso = null;
@@ -972,11 +1243,13 @@ async function clearCache(env, opts = {}) {
   const ledger = await loadLedger(env.ASCROBBLE_STATE);
   if (opts.clear_snapshot !== false) {
     ledger.previous_recent = [];
+    ledger.snapshot_poll_iso = void 0;
+    ledger.apple_history_interrupted = false;
+    ledger.pending_history_recovery = void 0;
+    ledger.history_recovery_notice = void 0;
     ledger.stationary_idle = false;
     ledger.handled_count = 0;
     ledger.position0_elapsed_sec = 0;
-    ledger.top_track_id = void 0;
-    ledger.top_track_play_count = void 0;
   }
   if (opts.clear_dedup !== false) {
     ledger.recent_scrobble_ids = [];
@@ -988,6 +1261,9 @@ async function clearCache(env, opts = {}) {
     ledger.recent_scrobbles = [];
   }
   if (opts.clear_circuit !== false) {
+    if (ledger.previous_recent.length > 0 && hasAppleHistoryError(ledger)) {
+      ledger.apple_history_interrupted = true;
+    }
     resetCircuit(ledger);
     ledger.stats.last_error_message = null;
     ledger.stats.last_error_iso = null;
@@ -1086,9 +1362,15 @@ var index_default = {
     }
     if (url.pathname === "/trigger" && request.method === "POST") {
       try {
-        await pollAndScrobble(env, true);
+        const run = await pollAndScrobble(env, true);
         const ledger = await getStatus(env);
-        return json({ ok: true, triggered: true, ledger }, 200, corsHeaders);
+        const status = run.recovery_deferred && !ledger.pending_history_recovery ? { ...ledger, history_recovery_notice: "Apple Music recovery will start on the next scheduled poll." } : ledger;
+        return json({
+          ok: run.ok,
+          triggered: true,
+          ledger: status,
+          error: run.error_message
+        }, 200, corsHeaders);
       } catch (err) {
         console.error("/trigger failed:", err);
         return json({ error: String(err) }, 500, corsHeaders);

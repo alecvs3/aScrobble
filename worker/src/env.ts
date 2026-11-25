@@ -41,6 +41,8 @@ export interface AppleTrack {
   album: string;
   duration_ms: number;
   isrc?: string;
+  /** Played from the user's library. Apple lists these apart from catalog plays. */
+  library?: boolean;
 }
 
 /** A detected play, before or after timestamp assignment. */

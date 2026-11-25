@@ -27,6 +27,15 @@ export interface LogEntry {
   level?: "info" | "warn" | "error" | "success";
 }
 
+export interface PendingHistoryRecovery {
+  plays: Array<{ track: AppleTrack; timestamp_iso: string; kind?: RecentScrobble["kind"] }>;
+  /** "retry" holds plays Last.fm didn't confirm during a regular poll. */
+  source?: "recovery" | "retry";
+  total: number;
+  accepted: number;
+  ignored: number;
+}
+
 export interface LedgerData {
   version: 1;
   last_run_iso: string | null;
@@ -41,8 +50,6 @@ export interface LedgerData {
     last_error_message: string | null;
   };
   log_entries?: LogEntry[];
-  top_track_id?: string;
-  top_track_play_count?: number;
   stationary_idle?: boolean;
   handled_count?: number;
   last_save_iso?: string;
@@ -50,6 +57,15 @@ export interface LedgerData {
   circuit_open_until_iso?: string;
   position0_elapsed_sec?: number;
   recent_scrobble_ids?: string[];
+  snapshot_poll_iso?: string;
+  apple_history_interrupted?: boolean;
+  pending_history_recovery?: PendingHistoryRecovery;
+  history_recovery_notice?: string;
+  /**
+   * When the worker started reading library plays. Snapshots and scrobbles
+   * from before this time hold catalog plays only.
+   */
+  library_history_since_iso?: string;
 }
 
 export function addLogEntry(
@@ -113,8 +129,8 @@ export async function saveLedger(
   kv: KVNamespace,
   ledger: LedgerData
 ): Promise<void> {
-  MEMORY_LEDGER_CACHE = ledger;
   await kv.put(LEDGER_KEY, JSON.stringify(ledger));
+  MEMORY_LEDGER_CACHE = ledger;
 }
 
 export function addRecentScrobbles(
