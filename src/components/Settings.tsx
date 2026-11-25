@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { loadUserSettings, redeployWorker, saveUserSettings, updatePollInterval } from "../lib/tauri";
+import { recordWorkerSync } from "../lib/worker-version";
 
 const enableAutostart = () => invoke("plugin:autostart|enable");
 const disableAutostart = () => invoke("plugin:autostart|disable");
@@ -7,6 +9,25 @@ const isAutostartEnabled = () => invoke<boolean>("plugin:autostart|is_enabled");
 
 interface SettingsProps {
   onBack: () => void;
+}
+
+function Toggle({ label, checked, disabled, onChange }: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      className={`toggle-switch ${checked ? "active" : ""}`}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    />
+  );
 }
 
 export function Settings({ onBack }: SettingsProps) {
@@ -18,113 +39,85 @@ export function Settings({ onBack }: SettingsProps) {
   const [autostart, setAutostart] = useState(false);
   const [logsLoading, setLogsLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [apiTestLoading, setApiTestLoading] = useState(false);
   const [apiTestResult, setApiTestResult] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const syncWorkerCode = async () => {
     setSyncLoading(true);
+    setError(null);
     try {
-      await invoke("redeploy_worker");
-      setToast("Worker code synced to Cloudflare ✓");
+      await redeployWorker();
+      recordWorkerSync();
+      setToast("Worker code synced to Cloudflare.");
       setTimeout(() => setToast(null), 3000);
-    } catch (e) {
-      alert(`Worker sync failed: ${e}`);
+    } catch (error) {
+      setError(`Worker sync failed: ${String(error)}`);
     } finally {
       setSyncLoading(false);
     }
   };
 
-  // Load settings — always apply theme immediately on mount
   useEffect(() => {
     const saved = localStorage.getItem("ascrobble_settings") || localStorage.getItem("ascrobble-settings");
     if (saved) {
       try {
-        const parsed = JSON.parse(saved);
-        setTheme(parsed.theme || "dark");
-        setAccentColor(parsed.accentColor || "brand");
-        setNotifications(parsed.notifications !== false);
-        setMinimizeToTray(parsed.minimizeToTray !== false);
-        setAutostart(parsed.autostart === true);
-        // Apply theme now (in case App.tsx didn't on load)
-        document.documentElement.setAttribute("data-theme", parsed.theme || "dark");
-        document.documentElement.setAttribute("data-accent", parsed.accentColor || "brand");
-      } catch {}
-    } else {
-      // Apply defaults
-      document.documentElement.setAttribute("data-theme", "dark");
-      document.documentElement.setAttribute("data-accent", "brand");
+        const { theme: savedTheme, accentColor: savedAccent } = JSON.parse(saved);
+        setTheme(savedTheme || "dark");
+        setAccentColor(savedAccent || "brand");
+      } catch {
+        // Ignore obsolete or invalid appearance settings.
+      }
     }
-    // Load poll interval & tray settings from Rust backend
-    invoke<{ poll_interval_minutes: number; minimize_to_tray: boolean; autostart: boolean }>("load_user_settings")
-      .then((s) => {
-        if (s.poll_interval_minutes) setPollingInterval(s.poll_interval_minutes);
-        if (typeof s.minimize_to_tray === "boolean") setMinimizeToTray(s.minimize_to_tray);
+    setSaving(true);
+    Promise.allSettled([loadUserSettings(), isAutostartEnabled()])
+      .then(([settings, startup]) => {
+        if (settings.status === "fulfilled") {
+          setPollingInterval(settings.value.poll_interval_minutes);
+          setMinimizeToTray(settings.value.minimize_to_tray ?? true);
+          setNotifications(settings.value.notifications ?? true);
+        } else {
+          setError(`Could not load settings: ${String(settings.reason)}`);
+        }
+        if (startup.status === "fulfilled") setAutostart(startup.value);
       })
-      .catch(() => {});
-
-    isAutostartEnabled()
-      .then((enabled: boolean) => setAutostart(enabled))
-      .catch(() => {});
+      .finally(() => setSaving(false));
   }, []);
 
-  // Auto-save and show toast
-  const updateSetting = useCallback(<K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
-    const newSettings = {
-      theme,
-      accentColor,
-      pollingInterval,
-      notifications,
-      minimizeToTray,
-      autostart,
-      [key]: value,
-    };
-    
-    localStorage.setItem("ascrobble_settings", JSON.stringify(newSettings));
-    
-    if (key === 'theme') {
-      document.documentElement.setAttribute("data-theme", value as string);
+  const saveAppearance = (nextTheme: typeof theme, nextAccent: typeof accentColor) => {
+    setError(null);
+    try {
+      localStorage.setItem("ascrobble_settings", JSON.stringify({ theme: nextTheme, accentColor: nextAccent }));
+      setTheme(nextTheme);
+      setAccentColor(nextAccent);
+      document.documentElement.setAttribute("data-theme", nextTheme);
+      document.documentElement.setAttribute("data-accent", nextAccent);
+    } catch (error) {
+      setError(`Could not save appearance settings: ${String(error)}`);
     }
-    if (key === 'accentColor') {
-      document.documentElement.setAttribute("data-accent", value as string);
+  };
+
+  const saveSetting = async (change: () => Promise<void>) => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await change();
+      setToast("Setting saved.");
+      setTimeout(() => setToast(null), 2000);
+    } catch (error) {
+      setError(`Could not save the setting: ${String(error)}`);
+    } finally {
+      setSaving(false);
     }
-
-    const nextPoll = key === 'pollingInterval' ? (value as number) : pollingInterval;
-    const nextTray = key === 'minimizeToTray' ? (value as boolean) : minimizeToTray;
-    const nextAuto = key === 'autostart' ? (value as boolean) : autostart;
-
-    invoke("save_user_settings", {
-      settings: {
-        poll_interval_minutes: nextPoll,
-        minimize_to_tray: nextTray,
-        autostart: nextAuto,
-      }
-    }).catch(console.error);
-
-    if (key === 'autostart') {
-      if (value) {
-        enableAutostart().catch(console.error);
-      } else {
-        disableAutostart().catch(console.error);
-      }
-    }
-    
-    setToast("Setting saved ✓");
-    setTimeout(() => setToast(null), 2000);
-  }, [theme, accentColor, pollingInterval, notifications, minimizeToTray, autostart]);
-
-type SettingsState = {
-  theme: "dark" | "oled" | "auto";
-  accentColor: "brand" | "spotify" | "blue";
-  pollingInterval: number;
-  notifications: boolean;
-  minimizeToTray: boolean;
-  autostart: boolean;
-};
+  };
 
   // Download diagnostic logs
   const downloadLogs = async () => {
     setLogsLoading(true);
+    setError(null);
     try {
       const fullLog = await invoke<string>("export_full_diagnostics");
 
@@ -143,77 +136,42 @@ type SettingsState = {
       setTimeout(() => setToast(null), 3500);
     } catch (e) {
       console.error("Failed to download logs:", e);
-      alert(`Export logs failed: ${e}`);
+      setError(`Export logs failed: ${String(e)}`);
     } finally {
       setLogsLoading(false);
     }
   };
 
   const openDataFolder = async () => {
+    setError(null);
     try {
       await invoke("open_data_folder");
     } catch (e) {
-      alert(`Could not open data folder: ${e}`);
+      setError(`Could not open data folder: ${String(e)}`);
     }
   };
 
   const testAppleApi = async () => {
     setApiTestLoading(true);
     setApiTestResult(null);
+    setError(null);
     try {
-      const result = await invoke<{
-        tokens_present: boolean;
-        developer_token_preview?: string;
-        music_user_token_preview?: string;
-        api_test?: { status: number; ok: boolean; body_preview?: string; error?: string };
-        curl_command_recent?: string;
-      }>("debug_export_apple_tokens");
-      
-      if (!result.tokens_present) {
-        setApiTestResult("No Apple tokens found. Connect Apple Music first.");
-        return;
-      }
-
-      const test = result.api_test;
-      let output = `Token Test Results:\n\n`;
-      output += `Developer Token: ${result.developer_token_preview}\n`;
-      output += `User Token: ${result.music_user_token_preview}\n\n`;
-      
-      if (test?.error) {
-        output += `API Test: FAILED - ${test.error}\n`;
-      } else {
-        output += `API Test: HTTP ${test?.status} (${test?.ok ? 'OK' : 'FAILED'})\n`;
-        if (test?.body_preview) {
-          output += `Response: ${test.body_preview.slice(0, 100)}...\n`;
-        }
-      }
-      
-      if (result.curl_command_recent) {
-        output += `\n\nCurl command for testing:\n${result.curl_command_recent}`;
-      }
-      
-      setApiTestResult(output);
-    } catch (e) {
-      setApiTestResult(`Error: ${e}`);
+      setApiTestResult(await invoke<string>("test_apple_api"));
+    } catch (error) {
+      setError(String(error));
     } finally {
       setApiTestLoading(false);
     }
   };
 
-  const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
-    <div 
-      className={`toggle-switch ${checked ? 'active' : ''}`}
-      onClick={() => onChange(!checked)}
-    />
-  );
-
   return (
     <div className="settings-container">
       {toast && (
-        <div className="toast">
+        <div className="toast" role="status">
           {toast}
         </div>
       )}
+      {error && <div className="status status-error" role="alert">{error}</div>}
       
       <div className="card">
         <div className="card-header">
@@ -239,8 +197,7 @@ type SettingsState = {
                 value={theme} 
                 onChange={(e) => {
                   const value = e.target.value as "dark" | "oled" | "auto";
-                  setTheme(value);
-                  updateSetting('theme', value);
+                  saveAppearance(value, accentColor);
                 }}
               >
                 <option value="dark">🌙 Dark (Default)</option>
@@ -260,8 +217,7 @@ type SettingsState = {
                 value={accentColor} 
                 onChange={(e) => {
                   const value = e.target.value as "brand" | "spotify" | "blue";
-                  setAccentColor(value);
-                  updateSetting('accentColor', value);
+                  saveAppearance(theme, value);
                 }}
               >
                 <option value="brand">🔴 Brand Red</option>
@@ -282,11 +238,13 @@ type SettingsState = {
             </div>
             <div className="settings-control">
               <Toggle 
+                label="Minimize to Tray"
+                disabled={saving}
                 checked={minimizeToTray} 
-                onChange={(v) => {
+                onChange={(v) => void saveSetting(async () => {
+                  await saveUserSettings({ ...await loadUserSettings(), minimize_to_tray: v });
                   setMinimizeToTray(v);
-                  updateSetting('minimizeToTray', v);
-                }} 
+                })}
               />
             </div>
           </div>
@@ -298,11 +256,14 @@ type SettingsState = {
             </div>
             <div className="settings-control">
               <Toggle 
+                label="Start on System Startup"
+                disabled={saving}
                 checked={autostart} 
-                onChange={(v) => {
+                onChange={(v) => void saveSetting(async () => {
+                  await (v ? enableAutostart() : disableAutostart());
                   setAutostart(v);
-                  updateSetting('autostart', v);
-                }} 
+                  await saveUserSettings({ ...await loadUserSettings(), autostart: v });
+                })}
               />
             </div>
           </div>
@@ -314,11 +275,13 @@ type SettingsState = {
             </div>
             <div className="settings-control">
               <Toggle 
+                label="Notifications"
+                disabled={saving}
                 checked={notifications} 
-                onChange={(v) => {
+                onChange={(v) => void saveSetting(async () => {
+                  await saveUserSettings({ ...await loadUserSettings(), notifications: v });
                   setNotifications(v);
-                  updateSetting('notifications', v);
-                }} 
+                })}
               />
             </div>
           </div>
@@ -335,10 +298,13 @@ type SettingsState = {
             <div className="settings-control">
               <select 
                 value={pollingInterval} 
+                disabled={saving}
                 onChange={(e) => {
                   const value = Number(e.target.value);
-                  setPollingInterval(value);
-                  updateSetting('pollingInterval', value);
+                  void saveSetting(async () => {
+                    await updatePollInterval(value);
+                    setPollingInterval(value);
+                  });
                 }}
               >
                 <option value={1}>1 minute (recommended)</option>
@@ -346,6 +312,8 @@ type SettingsState = {
                 <option value={3}>3 minutes</option>
                 <option value={5}>5 minutes</option>
                 <option value={10}>10 minutes</option>
+                <option value={15}>15 minutes</option>
+                <option value={30}>30 minutes</option>
               </select>
             </div>
           </div>

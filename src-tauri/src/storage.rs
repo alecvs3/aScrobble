@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use keyring::Entry;
 
 use crate::commands::{AppleTokens, CloudflareOauth, LastfmSession, UserSettings};
@@ -56,9 +56,7 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
     };
 
     let app_dir = base.join("aScrobble");
-    if !app_dir.exists() {
-        let _ = std::fs::create_dir_all(&app_dir);
-    }
+    std::fs::create_dir_all(&app_dir).context("Could not create the aScrobble data folder")?;
     Ok(app_dir)
 }
 
@@ -81,19 +79,13 @@ fn load_fallback_map() -> HashMap<String, String> {
     }
 }
 
-fn save_fallback_val(key: &str, value: Option<&str>) {
+fn save_fallback_val(key: &str, value: Option<&str>) -> Result<()> {
     let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = match get_fallback_json_path() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let mut map = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
+    let path = get_fallback_json_path()?;
+    let mut map: HashMap<String, String> = match std::fs::read_to_string(&path) {
+        Ok(stored) => serde_json::from_str(&stored).context("Could not read the saved credential data")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(error) => return Err(error).context("Could not open the saved credential data"),
     };
 
     match value {
@@ -105,14 +97,15 @@ fn save_fallback_val(key: &str, value: Option<&str>) {
         }
     }
 
-    if let Ok(json) = serde_json::to_string_pretty(&map) {
-        let _ = std::fs::write(path, json);
-    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&map)?)
+        .context("Could not save the updated credential data")?;
+    std::fs::rename(temporary, path).context("Could not replace the saved credential data")
 }
 
 fn write_val(user: &str, value: &str) -> Result<()> {
     // 1. Always save to fallback file store
-    save_fallback_val(user, Some(value));
+    save_fallback_val(user, Some(value))?;
 
     // 2. Best-effort write to OS keyring if value is within safe Credential Manager limits
     if value.len() <= 400 {
@@ -124,7 +117,12 @@ fn write_val(user: &str, value: &str) -> Result<()> {
 }
 
 fn read_val(user: &str) -> Result<Option<String>> {
-    // 1. Try keyring first
+    // The file is written first and also holds entries too large for the keyring.
+    if let Some(value) = load_fallback_map().remove(user).filter(|value| !value.is_empty()) {
+        return Ok(Some(value));
+    }
+
+    // Keep older, keyring-only entries readable.
     if let Ok(e) = entry(user) {
         if let Ok(s) = e.get_password() {
             if !s.is_empty() {
@@ -133,19 +131,11 @@ fn read_val(user: &str) -> Result<Option<String>> {
         }
     }
 
-    // 2. Fall back to app-data credentials store
-    let map = load_fallback_map();
-    if let Some(val) = map.get(user) {
-        if !val.is_empty() {
-            return Ok(Some(val.clone()));
-        }
-    }
-
     Ok(None)
 }
 
 fn delete_val(user: &str) -> Result<()> {
-    save_fallback_val(user, None);
+    save_fallback_val(user, None)?;
     if let Ok(e) = entry(user) {
         let _ = e.delete_credential();
     }

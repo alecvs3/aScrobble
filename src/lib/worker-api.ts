@@ -1,8 +1,8 @@
 // Typed fetch wrappers for the deployed worker's HTTP endpoints.
 // Each takes the worker URL and status auth key as params.
 
-import type { WorkerLedger } from "../types";
-import { getWorkerStatus, resetWorkerStatsBackend } from "./tauri";
+import type { WorkerLedger, WorkerTrigger } from "../types";
+import { getWorkerStatus, resetWorkerStatsBackend, triggerWorker } from "./tauri";
 
 export async function fetchHealth(
   workerUrl: string
@@ -36,49 +36,18 @@ export async function fetchStatus(
   }
 }
 
-export async function triggerScrobble(
-  workerUrl: string,
-  authKey: string
-): Promise<{ ok: boolean; triggered: boolean; ledger?: WorkerLedger }> {
-  try {
-    const resp = await fetch(`${workerUrl}/trigger?key=${encodeURIComponent(authKey)}&_t=${Date.now()}`, {
-      method: "POST",
-      headers: { "Cache-Control": "no-cache" },
-    });
-    if (resp.status === 401) {
-      throw new Error(
-        "Unauthorized: invalid STATUS_AUTH_KEY. The worker may not be fully deployed. Try redeploying."
-      );
-    }
-    if (!resp.ok) {
-      throw new Error(`Trigger failed: HTTP ${resp.status}`);
-    }
-    return resp.json();
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("Failed to fetch")) {
-      throw new Error(
-        `Failed to trigger scrobble: worker is unreachable at ${workerUrl}`
-      );
-    }
-    throw e;
-  }
+export function triggerScrobble(
+  _workerUrl: string,
+  _authKey: string,
+): Promise<WorkerTrigger> {
+  return triggerWorker();
 }
 
-export async function resetWorkerStats(
-  workerUrl: string,
-  authKey: string
+export function resetWorkerStats(
+  _workerUrl: string,
+  _authKey: string,
 ): Promise<WorkerLedger> {
-  try {
-    const ledger = await resetWorkerStatsBackend();
-    return ledger;
-  } catch (e) {
-    const resp = await fetch(`${workerUrl}/reset-stats?key=${encodeURIComponent(authKey)}`, {
-      method: "POST",
-    });
-    if (!resp.ok) throw new Error(`Reset stats failed: HTTP ${resp.status}`);
-    return resp.json();
-  }
+  return resetWorkerStatsBackend();
 }
 
 export async function fetchLastfmAlbumArt(

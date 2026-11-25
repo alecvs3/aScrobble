@@ -50,9 +50,10 @@ pub async fn check_health() -> HealthStatus {
             if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {
                 let now = Utc::now();
                 let diff_sec = dt.with_timezone(&Utc).timestamp() - now.timestamp();
-                let days = diff_sec / 86400;
+                let days = if diff_sec > 0 { (diff_sec + 86_399) / 86_400 } else { 0 };
                 status.apple_days_remaining = Some(days);
-                if days <= 0 {
+                if diff_sec <= 0 {
+                    status.apple_ok = false;
                     status.apple_expired = true;
                 } else if days <= 3 {
                     status.apple_expires_soon = true;
@@ -70,38 +71,36 @@ pub async fn check_health() -> HealthStatus {
     let worker_url = storage::load_worker_url().ok().flatten();
     let auth_key = storage::load_status_auth_key().ok().flatten();
 
-    if let (Some(url), Some(key)) = (worker_url, auth_key) {
+    if worker_url.is_some() && auth_key.is_some() {
         status.worker_deployed = true;
-        let now_ms = Utc::now().timestamp_millis();
-        let ledger_url = format!("{}/status?key={}&_t={}", url, key, now_ms);
-        let resp = reqwest::Client::new()
-            .get(&ledger_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => {
+        match crate::commands::get_worker_status().await {
+            Ok(ledger) => {
                 status.worker_reachable = true;
-                if let Ok(ledger) = r.json::<crate::commands::WorkerLedger>().await {
-                    if let Some(ref circuit) = ledger.circuit_open_until_iso {
-                        status.circuit_open = true;
+                let error = ledger.stats.last_error_message.as_deref();
+                if error == Some("apple_token_expired") {
+                    status.apple_ok = false;
+                    status.apple_expired = true;
+                    status.apple_expires_soon = false;
+                    status.apple_days_remaining = Some(0);
+                }
+                if let Some(until) = ledger.circuit_open_until_iso
+                    .as_deref()
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .filter(|until| *until > Utc::now())
+                {
+                    status.circuit_open = true;
+                    if !status.apple_expired {
                         status.worker_error = Some(format!(
-                            "Worker circuit breaker active until {}",
-                            circuit
+                            "Polling is paused until {}. You can retry now.",
+                            until.with_timezone(&chrono::Local).format("%b %d at %I:%M %p")
                         ));
-                    } else if ledger.stats.total_errors > 0 {
-                        if let Some(ref err) = ledger.stats.last_error_message {
-                            status.worker_error = Some(err.clone());
-                        }
                     }
+                } else if error != Some("apple_token_expired") {
+                    status.worker_error = error.map(str::to_owned);
                 }
             }
-            Ok(r) => {
-                status.worker_error = Some(format!("Worker status returned HTTP {}", r.status()));
-            }
             Err(e) => {
-                status.worker_error = Some(format!("Worker unreachable: {}", e));
+                status.worker_error = Some(e);
             }
         }
     }
@@ -116,6 +115,9 @@ pub async fn run_and_emit_health(app: &AppHandle) -> HealthStatus {
 }
 
 pub async fn maybe_notify_os(app: &AppHandle, status: &HealthStatus) {
+    if !storage::load_user_settings().unwrap_or_default().notifications {
+        return;
+    }
     if let Some(days) = status.apple_days_remaining {
         if days <= 3 && days > 0 {
             let _ = app

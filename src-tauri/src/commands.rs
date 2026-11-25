@@ -84,11 +84,13 @@ pub struct StoredCredentials {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSettings {
-    pub poll_interval_minutes: u32, // 1, 2, 5, 10, 15, or 30
+    pub poll_interval_minutes: u32, // 1, 2, 3, 5, 10, 15, or 30
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default = "default_true")]
+    pub notifications: bool,
 }
 
 fn default_true() -> bool {
@@ -101,6 +103,7 @@ impl Default for UserSettings {
             poll_interval_minutes: 1,
             minimize_to_tray: true,
             autostart: false,
+            notifications: true,
         }
     }
 }
@@ -143,6 +146,7 @@ pub struct WorkerLedger {
     pub version: u32,
     pub last_run_iso: Option<String>,
     pub circuit_open_until_iso: Option<String>,
+    pub history_recovery_notice: Option<String>,
     pub recent_scrobbles: Vec<RecentScrobble>,
     pub stats: LedgerStats,
     pub log_entries: Option<Vec<LogEntry>>,
@@ -158,7 +162,9 @@ fn err(e: impl std::fmt::Display) -> String {
 
 #[tauri::command]
 pub async fn apple_start_auth(app: AppHandle) -> Result<AppleTokens, String> {
-    auth::apple::start_auth_flow(&app).await.map_err(err)
+    let tokens = auth::apple::start_auth_flow(&app, None).await.map_err(err)?;
+    storage::save_apple_tokens(&tokens).map_err(err)?;
+    Ok(tokens)
 }
 
 #[tauri::command]
@@ -167,8 +173,8 @@ pub async fn apple_get_tokens() -> Result<Option<AppleTokens>, String> {
 }
 
 #[tauri::command]
-pub async fn apple_cancel_auth(app: AppHandle) -> Result<(), String> {
-    auth::apple::cancel_auth_flow(&app).await.map_err(err)
+pub fn apple_cancel_auth() {
+    auth::apple::cancel_auth_flow();
 }
 
 // ---------- Last.fm ----------
@@ -324,13 +330,15 @@ pub async fn load_user_settings() -> Result<UserSettings, String> {
 #[tauri::command]
 pub async fn rotate_apple_tokens(
     app: AppHandle,
-    account_id: String,
+    account_id: Option<String>,
 ) -> Result<(), String> {
-    let apple = auth::apple::start_auth_flow(&app).await.map_err(err)?;
-    storage::save_apple_tokens(&apple).map_err(err)?;
-    crate::deploy::rotate_apple_tokens(&account_id, &apple)
+    let previous = storage::load_apple_tokens().map_err(err)?;
+    let apple = auth::apple::start_auth_flow(&app, previous).await.map_err(err)?;
+    let account_id = storage::load_cloudflare_account_id().map_err(err)?.or(account_id);
+    crate::deploy::rotate_apple_tokens(account_id.as_deref(), &apple)
         .await
         .map_err(err)?;
+    storage::save_apple_tokens(&apple).map_err(err)?;
     Ok(())
 }
 
@@ -344,34 +352,54 @@ pub async fn get_status_auth_key() -> Result<Option<String>, String> {
     storage::load_status_auth_key().map_err(err)
 }
 
-#[tauri::command]
-pub async fn get_worker_status() -> Result<WorkerLedger, String> {
+async fn worker_request(method: reqwest::Method, path: &str) -> Result<reqwest::Response, String> {
     let worker_url = storage::load_worker_url().map_err(err)?;
     let auth_key = storage::load_status_auth_key().map_err(err)?;
+    let (Some(url), Some(key)) = (worker_url, auth_key) else {
+        return Err("Worker connection details are missing. Reconnect the existing Worker in setup.".into());
+    };
 
-    if worker_url.is_none() || auth_key.is_none() {
-        return Err("Worker not deployed or missing status auth key".to_string());
-    }
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let ledger_url = format!("{}/status?key={}&_t={}", worker_url.unwrap(), auth_key.unwrap(), now_ms);
-    let resp = reqwest::Client::new()
-        .get(&ledger_url)
-        .header("Cache-Control", "no-cache, no-store, must-revalidate")
-        .header("Pragma", "no-cache")
-        .timeout(std::time::Duration::from_secs(20))
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(err)?
+        .request(method, format!("{url}{path}"))
+        .header("x-ascrobble-auth", key)
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch worker ledger: {}", e))?;
+        .map_err(|error| format!("Could not reach the Worker: {}", error.without_url()))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("Worker status HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+    if !response.status().is_success() {
+        return Err(format!("Worker {path} returned HTTP {}", response.status()));
     }
+    Ok(response)
+}
 
-    let ledger = resp.json::<WorkerLedger>().await
-        .map_err(|e| format!("Failed to parse worker ledger JSON: {}", e))?;
+#[tauri::command]
+pub async fn get_worker_status() -> Result<WorkerLedger, String> {
+    worker_request(reqwest::Method::GET, "/status")
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Could not read Worker status: {}", error.without_url()))
+}
 
-    Ok(ledger)
+#[derive(Serialize, Deserialize)]
+pub struct WorkerTrigger {
+    ok: bool,
+    triggered: bool,
+    ledger: Option<WorkerLedger>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn trigger_worker() -> Result<WorkerTrigger, String> {
+    worker_request(reqwest::Method::POST, "/trigger")
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Could not read the poll result: {}", error.without_url()))
 }
 
 
@@ -382,49 +410,24 @@ pub async fn deploy_status(app: AppHandle, account_id: String) -> Result<DeployS
         .map_err(err)
 }
 
-/// Debug command: Export Apple tokens for API testing (careful - these are sensitive!)
 #[tauri::command]
-pub async fn debug_export_apple_tokens() -> Result<serde_json::Value, String> {
-    let tokens = storage::load_apple_tokens().map_err(err)?;
-    
-    match tokens {
-        Some(t) => {
-            // Test the tokens immediately
-            let client = reqwest::Client::new();
-            let test_resp = client
-                .get("https://api.music.apple.com/v1/me/recent/played/tracks?limit=1")
-                .header("Authorization", format!("Bearer {}", t.developer_token))
-                .header("Music-User-Token", &t.music_user_token)
-                .header("Origin", "https://music.apple.com")
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-                
-            let test_result = match test_resp {
-                Ok(r) => {
-                    let status = r.status();
-                    let body = r.text().await.unwrap_or_default();
-                    serde_json::json!({
-                        "status": status.as_u16(),
-                        "ok": status.is_success(),
-                        "body_preview": body.chars().take(200).collect::<String>()
-                    })
-                }
-                Err(e) => serde_json::json!({"error": e.to_string()})
-            };
-            
-            Ok(serde_json::json!({
-                "tokens_present": true,
-                "developer_token_preview": format!("{}...", &t.developer_token[..20.min(t.developer_token.len())]),
-                "music_user_token_preview": format!("{}...", &t.music_user_token[..20.min(t.music_user_token.len())]),
-                "api_test": test_result,
-                "curl_command_recent": format!(
-                    "curl -H \"Authorization: Bearer {}\" -H \"Music-User-Token: {}\" -H \"Origin: https://music.apple.com\" \"https://api.music.apple.com/v1/me/recent/played/tracks?limit=10\"",
-                    t.developer_token, t.music_user_token
-                ),
-            }))
-        }
-        None => Ok(serde_json::json!({"tokens_present": false}))
+pub async fn test_apple_api() -> Result<String, String> {
+    let tokens = storage::load_apple_tokens().map_err(err)?
+        .ok_or("Connect Apple Music before testing the API.")?;
+    let response = reqwest::Client::new()
+        .get("https://api.music.apple.com/v1/me/recent/played/tracks?limit=1")
+        .bearer_auth(tokens.developer_token)
+        .header("Music-User-Token", tokens.music_user_token)
+        .header("Origin", "https://music.apple.com")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach Apple Music: {}", error.without_url()))?;
+
+    match response.status().as_u16() {
+        200 => Ok("Apple Music accepted the saved tokens.".into()),
+        401 => Err("Apple Music rejected the saved tokens. Rotate them from the dashboard.".into()),
+        status => Err(format!("Apple Music returned HTTP {status}.")),
     }
 }
 
@@ -439,50 +442,31 @@ pub async fn open_data_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn update_poll_interval(minutes: u32) -> Result<(), String> {
-    let mut settings = storage::load_user_settings().unwrap_or_default();
-    settings.poll_interval_minutes = minutes;
-    storage::save_user_settings(&settings).map_err(err)?;
-
-    if let Ok(token) = crate::deploy::resolve_cloudflare_api_token().await {
-        if let Ok(Some(account_id)) = storage::load_cloudflare_account_id() {
-            let cron_expr = format!("*/{} * * * *", minutes);
-            let client = reqwest::Client::new();
-            if let Err(e) = crate::deploy::set_cron_schedule(&client, &token, &account_id, &cron_expr).await {
-                log::warn!("Failed to set Cloudflare cron schedule: {}", e);
-            }
-        }
+    if !crate::deploy::VALID_INTERVALS.contains(&minutes) {
+        return Err("Unsupported polling interval.".into());
     }
-    Ok(())
+    let mut settings = storage::load_user_settings().map_err(err)?;
+    if settings.poll_interval_minutes == minutes {
+        return Ok(());
+    }
+    let account_id = storage::load_cloudflare_account_id().map_err(err)?
+        .ok_or("Reconnect Cloudflare in setup to change the polling interval.")?;
+    let token = crate::deploy::resolve_cloudflare_api_token().await.map_err(err)?;
+    let cron_expr = format!("*/{} * * * *", minutes);
+    crate::deploy::set_cron_schedule(&reqwest::Client::new(), &token, &account_id, &cron_expr)
+        .await
+        .map_err(err)?;
+    settings.poll_interval_minutes = minutes;
+    storage::save_user_settings(&settings).map_err(err)
 }
 
 #[tauri::command]
 pub async fn reset_worker_stats() -> Result<WorkerLedger, String> {
-    let worker_url = storage::load_worker_url().map_err(err)?;
-    let auth_key = storage::load_status_auth_key().map_err(err)?;
-
-    if worker_url.is_none() || auth_key.is_none() {
-        return Err("Worker not deployed or missing status auth key".to_string());
-    }
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let url = format!("{}/reset-stats?key={}&_t={}", worker_url.unwrap(), auth_key.unwrap(), now_ms);
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .header("Cache-Control", "no-cache, no-store, must-revalidate")
-        .header("Pragma", "no-cache")
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
+    worker_request(reqwest::Method::POST, "/reset-stats")
+        .await?
+        .json()
         .await
-        .map_err(|e| format!("Failed to reset worker stats: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Reset stats HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
-    }
-
-    let ledger = resp.json::<WorkerLedger>().await
-        .map_err(|e| format!("Failed to parse worker ledger JSON: {}", e))?;
-
-    Ok(ledger)
+        .map_err(|error| format!("Could not read the reset result: {}", error.without_url()))
 }
 
 #[tauri::command]

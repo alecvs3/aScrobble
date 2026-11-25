@@ -60,6 +60,24 @@
   --color-border: #1f1f1f;
 }
 
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] {
+    color-scheme: light;
+    --color-bg-primary: #f7f7f7;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #f1f1f1;
+    --color-bg-elevated: #e7e7e7;
+    --color-bg-hover: #dedede;
+    --color-bg-pressed: #d4d4d4;
+    --color-text-primary: #151515;
+    --color-text-secondary: #424242;
+    --color-text-tertiary: #5e5e5e;
+    --color-text-disabled: #747474;
+    --color-border: #d4d4d4;
+    --color-border-hover: #a6a6a6;
+  }
+}
+
 /* ===== Accent Color Variants ===== */
 [data-accent="spotify"] {
   --color-brand: #1db954;
@@ -1789,12 +1807,19 @@ code {
   position: relative;
   width: 48px;
   height: 24px;
+  border: 0;
   background: var(--color-bg-elevated);
   border-radius: 12px;
   cursor: pointer;
   transition: background var(--transition-fast);
   user-select: none;
   -webkit-user-select: none;
+}
+
+.toggle-switch:disabled,
+.btn-health-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .toggle-switch.active {

@@ -3,11 +3,18 @@ import type { HealthStatus } from "../types";
 
 interface HealthBannersProps {
   status: HealthStatus | null;
+  busy: boolean;
+  rotating: boolean;
+  syncing: boolean;
+  retrying: boolean;
   onRotateApple?: () => void;
   onFixWorker?: () => void;
+  onRetryWorker?: () => void;
 }
 
-export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBannersProps) {
+export function HealthBanners({
+  status, busy, rotating, syncing, retrying, onRotateApple, onFixWorker, onRetryWorker,
+}: HealthBannersProps) {
   const [dismissed, setDismissed] = useState<Record<string, boolean>>({});
 
   // DEV Test Overrides
@@ -35,15 +42,18 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
     setDismissed((prev) => ({ ...prev, [id]: true }));
   };
 
-  const showAppleExpired = activeStatus.apple_expired && !dismissed["apple-expired"];
+  const appleExpiredKey = `apple-expired:${activeStatus.apple_expiry_iso ?? ""}`;
+  const appleSoonKey = `apple-soon:${activeStatus.apple_expiry_iso ?? ""}`;
+  const workerErrorKey = `worker-error:${activeStatus.worker_error}`;
+  const showAppleExpired = activeStatus.apple_expired && !dismissed[appleExpiredKey];
   const showAppleSoon =
     !activeStatus.apple_expired &&
     activeStatus.apple_expires_soon &&
-    !dismissed["apple-soon"];
+    !dismissed[appleSoonKey];
   const showWorkerError =
     activeStatus.worker_deployed &&
     activeStatus.worker_error &&
-    !dismissed["worker-error"];
+    !dismissed[workerErrorKey];
 
   return (
     <div className="health-banners-container">
@@ -107,7 +117,7 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
             <span className="health-banner-badge danger">🚨 Scrobbling Stopped</span>
             <button
               className="update-banner-close"
-              onClick={() => dismiss("apple-expired")}
+              onClick={() => dismiss(appleExpiredKey)}
               title="Dismiss"
             >
               ✕
@@ -119,8 +129,8 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
           </div>
           <div className="health-banner-actions">
             {onRotateApple && (
-              <button className="btn-health-action danger" onClick={onRotateApple}>
-                🔑 Rotate Apple Tokens
+              <button className="btn-health-action danger" onClick={onRotateApple} disabled={busy}>
+                {rotating ? "Waiting for Apple Music…" : "🔑 Rotate Apple Tokens"}
               </button>
             )}
           </div>
@@ -134,7 +144,7 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
             <span className="health-banner-badge warning">⚠️ Token Expiring Soon</span>
             <button
               className="update-banner-close"
-              onClick={() => dismiss("apple-soon")}
+              onClick={() => dismiss(appleSoonKey)}
               title="Dismiss"
             >
               ✕
@@ -148,8 +158,8 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
           </div>
           <div className="health-banner-actions">
             {onRotateApple && (
-              <button className="btn-health-action warning" onClick={onRotateApple}>
-                🔑 Rotate Token Now
+              <button className="btn-health-action warning" onClick={onRotateApple} disabled={busy}>
+                {rotating ? "Waiting for Apple Music…" : "🔑 Rotate Token Now"}
               </button>
             )}
           </div>
@@ -160,10 +170,12 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
       {showWorkerError && (
         <div className="health-banner health-banner-danger">
           <div className="health-banner-header">
-            <span className="health-banner-badge danger">☁️ Cloudflare Issue</span>
+            <span className="health-banner-badge danger">
+              {activeStatus.worker_reachable ? "Polling issue" : "☁️ Worker unavailable"}
+            </span>
             <button
               className="update-banner-close"
-              onClick={() => dismiss("worker-error")}
+              onClick={() => dismiss(workerErrorKey)}
               title="Dismiss"
             >
               ✕
@@ -171,10 +183,16 @@ export function HealthBanners({ status, onRotateApple, onFixWorker }: HealthBann
           </div>
           <div className="health-banner-title">Scrobbler Worker Alert</div>
           <div className="health-banner-desc">{activeStatus.worker_error}</div>
-          {onFixWorker && (
+          {activeStatus.worker_reachable && onRetryWorker ? (
             <div className="health-banner-actions">
-              <button className="btn-health-action danger" onClick={onFixWorker}>
-                ⚡ Resync Worker Code
+              <button className="btn-health-action danger" onClick={onRetryWorker} disabled={busy}>
+                {retrying ? "Retrying…" : "Retry Poll"}
+              </button>
+            </div>
+          ) : onFixWorker && (
+            <div className="health-banner-actions">
+              <button className="btn-health-action danger" onClick={onFixWorker} disabled={busy}>
+                {syncing ? "Syncing Worker…" : "⚡ Resync Worker Code"}
               </button>
             </div>
           )}

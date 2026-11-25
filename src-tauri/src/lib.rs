@@ -98,6 +98,7 @@ pub fn run() {
                 health::maybe_notify_os(&handle, &status).await;
 
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                interval.tick().await;
                 loop {
                     interval.tick().await;
                     let status = health::run_and_emit_health(&handle).await;
@@ -109,6 +110,9 @@ pub fn run() {
         })
 
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let settings = storage::load_user_settings().unwrap_or_default();
                 if settings.minimize_to_tray {
@@ -153,12 +157,13 @@ pub fn run() {
             commands::deploy_worker,
             commands::deploy_status,
             commands::get_worker_status,
+            commands::trigger_worker,
             commands::rotate_apple_tokens,
             commands::get_worker_url,
             commands::get_status_auth_key,
             
             // Debug
-            commands::debug_export_apple_tokens,
+            commands::test_apple_api,
             commands::open_data_folder,
             commands::get_app_logs,
             commands::save_log_file,

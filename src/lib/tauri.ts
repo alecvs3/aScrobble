@@ -100,7 +100,7 @@ export const deployWorker = (
 export const deployStatus = (accountId: string): Promise<DeployStatus> =>
   invoke("deploy_status", { accountId });
 
-export const rotateAppleTokens = (accountId: string): Promise<void> =>
+export const rotateAppleTokens = (accountId: string | null): Promise<void> =>
   invoke("rotate_apple_tokens", { accountId });
 
 export const getWorkerUrl = (): Promise<string | null> =>
@@ -111,6 +111,9 @@ export const getStatusAuthKey = (): Promise<string | null> =>
 
 export const getWorkerStatus = (): Promise<WorkerLedger> =>
   invoke("get_worker_status");
+
+export const triggerWorker = (): Promise<import("../types").WorkerTrigger> =>
+  invoke("trigger_worker");
 
 export const updatePollInterval = (minutes: number): Promise<void> =>
   invoke("update_poll_interval", { minutes });

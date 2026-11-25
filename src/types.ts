@@ -45,6 +45,9 @@ export interface DeployStatus {
 
 export interface UserSettings {
   poll_interval_minutes: number; // 1, 2, 3, 5, 10, 15, or 30
+  minimize_to_tray?: boolean;
+  autostart?: boolean;
+  notifications?: boolean;
 }
 
 export interface RecentScrobble {
@@ -76,10 +79,18 @@ export interface WorkerLedger {
   last_run_iso: string | null;
   last_save_iso?: string | null;
   circuit_open_until_iso?: string | null;
+  history_recovery_notice?: string | null;
   consecutive_errors?: number;
   recent_scrobbles: RecentScrobble[];
   stats: LedgerStats;
   log_entries?: LogEntry[];
+}
+
+export interface WorkerTrigger {
+  ok: boolean;
+  triggered: boolean;
+  ledger?: WorkerLedger | null;
+  error?: string | null;
 }
 
 export interface HealthStatus {

@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-shell";
+import { version } from "../package.json";
 import type { StoredCredentials, WizardStep } from "./types";
 import { storageGetAll, storageClearAll } from "./lib/tauri";
 import { Stepper } from "./components/Stepper";
@@ -49,11 +51,13 @@ function Sidebar({
   step, 
   onNavigate, 
   onReconfigureClick,
+  onOpenLink,
   status 
 }: { 
   step: WizardStep; 
   onNavigate: (s: WizardStep) => void;
   onReconfigureClick: () => void;
+  onOpenLink: (url: string) => void;
   status: { color: string; text: string };
 }) {
   const isDashboard = step === "dashboard" || step === "done";
@@ -98,24 +102,20 @@ function Sidebar({
 
       <nav className="sidebar-nav">
         <div className="sidebar-section-title">Links</div>
-        <a 
+        <button
           className="sidebar-link"
-          href="https://last.fm"
-          target="_blank"
-          rel="noreferrer"
+          onClick={() => onOpenLink("https://www.last.fm")}
         >
           <span className="sidebar-link-icon">🎵</span>
           <span className="sidebar-link-text">Last.fm</span>
-        </a>
-        <a 
+        </button>
+        <button
           className="sidebar-link"
-          href="https://dash.cloudflare.com"
-          target="_blank"
-          rel="noreferrer"
+          onClick={() => onOpenLink("https://dash.cloudflare.com")}
         >
           <span className="sidebar-link-icon">☁️</span>
           <span className="sidebar-link-text">Cloudflare</span>
-        </a>
+        </button>
       </nav>
 
       {isDashboard && (
@@ -136,6 +136,7 @@ export default function App() {
   const [creds, setCreds] = useState<StoredCredentials | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [workerStatus, setWorkerStatus] = useState({ color: "gray", text: "Unknown" });
   const [showReconfigureWarning, setShowReconfigureWarning] = useState(false);
 
@@ -191,6 +192,16 @@ export default function App() {
   };
 
   const isWizard = ["welcome", "apple", "lastfm", "cloudflare", "deploy"].includes(step);
+  const openLink = (url: string) => {
+    setActionError(null);
+    open(url).catch((error) => setActionError(`Could not open the browser: ${String(error)}`));
+  };
+  const handleReset = () => {
+    setCreds(null);
+    setSyncError(null);
+    setActionError(null);
+    setStep("welcome");
+  };
 
   if (loading) {
     return (
@@ -217,6 +228,7 @@ export default function App() {
           step={step} 
           onNavigate={setStep}
           onReconfigureClick={() => setShowReconfigureWarning(true)}
+          onOpenLink={openLink}
           status={workerStatus}
         />
       )}
@@ -248,6 +260,7 @@ export default function App() {
             </div>
           </div>
         )}
+        {actionError && <div className="status status-error" role="alert">{actionError}</div>}
 
         {isWizard && <Stepper current={step} />}
 
@@ -302,7 +315,7 @@ export default function App() {
         {step === "dashboard" && creds && (
           <Dashboard 
             creds={creds} 
-            onReset={() => setStep("welcome")}
+            onReset={handleReset}
             onStatusChange={setWorkerStatus}
           />
         )}
@@ -312,9 +325,12 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span>aScrobble v1.1.3</span>
+        <span>aScrobble v{version}</span>
         <div className="footer-links">
-          <a href="https://github.com/ThisCrashesYouOnPhone/aScrobble" target="_blank" rel="noreferrer">
+          <a href="https://github.com/alecvs3/aScrobble" onClick={(event) => {
+            event.preventDefault();
+            openLink(event.currentTarget.href);
+          }}>
             GitHub
           </a>
           <a
@@ -324,12 +340,10 @@ export default function App() {
               if (window.confirm("Reset all stored credentials and restart setup?")) {
                 try {
                   await storageClearAll();
+                  handleReset();
                 } catch (err) {
-                  console.error("Failed to clear storage:", err);
+                  setActionError(`Could not reset credentials: ${String(err)}`);
                 }
-                setCreds(null);
-                setSyncError(null);
-                setStep("welcome");
               }
             }}
           >

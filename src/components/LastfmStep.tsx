@@ -34,14 +34,14 @@ export function LastfmStep({ existing, onComplete, onBack }: LastfmStepProps) {
   const handleCancel = async () => {
     try {
       await lastfmCancelAuth();
-    } catch {
-      // best effort
+    } catch (error) {
+      setError(`Could not cancel Last.fm sign-in: ${String(error)}`);
     }
-    setBusy(false);
   };
 
   const openCreateApp = () => {
-    open("https://www.last.fm/api/account/create").catch(console.error);
+    open("https://www.last.fm/api/account/create")
+      .catch((error) => setError(`Could not open Last.fm: ${String(error)}`));
   };
 
   return (

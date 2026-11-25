@@ -17,8 +17,6 @@ export function AppleStep({ existing, onComplete, onBack }: AppleStepProps) {
     setError(null);
     try {
       await appleStartAuth();
-      // Wait a moment for credentials to be fully written to keychain
-      await new Promise((resolve) => setTimeout(resolve, 200));
       onComplete();
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
@@ -31,10 +29,9 @@ export function AppleStep({ existing, onComplete, onBack }: AppleStepProps) {
   const handleCancel = async () => {
     try {
       await appleCancelAuth();
-    } catch {
-      // best effort
+    } catch (error) {
+      setError(`Could not cancel Apple Music sign-in: ${String(error)}`);
     }
-    setBusy(false);
   };
 
   return (

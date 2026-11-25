@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import type { StoredCredentials } from "../types";
 import { deployWorker, storageGetAll, loadUserSettings, saveUserSettings } from "../lib/tauri";
+import { recordWorkerSync } from "../lib/worker-version";
 
 const INTERVAL_OPTIONS = [
   { value: 1, label: "1 minute (recommended, most responsive)" },
@@ -121,13 +122,14 @@ export function DeployStep({ creds, onComplete, onBack }: DeployStepProps) {
     setHistory([]);
     setProgress(null);
     try {
-      await saveUserSettings({ poll_interval_minutes: pollInterval });
       const result = await deployWorker(
         effectiveCreds.cloudflare_account_id,
         pollInterval,
         listenbrainzToken.trim() || undefined,
         webhookUrl.trim() || undefined,
       );
+      await saveUserSettings({ ...await loadUserSettings(), poll_interval_minutes: pollInterval });
+      recordWorkerSync();
       setWorkerName(result);
       setPhase("success");
       // Brief pause so the user sees the success state
@@ -328,8 +330,12 @@ export function DeployStep({ creds, onComplete, onBack }: DeployStepProps) {
               If the dashboard shows "Failed to fetch", make sure you have set up a workers.dev subdomain.
               Visit your{" "}
               <a
-                href="#"
-                onClick={() => open(`https://dash.cloudflare.com/${effectiveCreds.cloudflare_account_id}/workers`).catch(console.error)}
+                href={`https://dash.cloudflare.com/${effectiveCreds.cloudflare_account_id}/workers`}
+                onClick={(event) => {
+                  event.preventDefault();
+                  open(event.currentTarget.href)
+                    .catch((error) => setError(`Could not open Cloudflare: ${String(error)}`));
+                }}
                 style={{ color: "inherit", textDecoration: "underline" }}
               >
                 Cloudflare Workers settings

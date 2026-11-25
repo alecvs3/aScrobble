@@ -79,7 +79,8 @@ export function CloudflareStep({
       const url = await cloudflareTemplateUrl();
       await open(url);
     } catch {
-      open("https://dash.cloudflare.com/profile/api-tokens").catch(console.error);
+      open("https://dash.cloudflare.com/profile/api-tokens")
+        .catch((error) => setManualError(`Could not open Cloudflare: ${String(error)}`));
     }
   };
 
@@ -132,13 +133,13 @@ export function CloudflareStep({
     setOauthBusy(true);
     try {
       await cloudflareOauthLogout();
-    } catch {
-      // best effort
-    } finally {
       setSessionState("none");
       setOauthAccounts([]);
       setOauthSelection("");
       setOauthError(null);
+    } catch (error) {
+      setOauthError(`Could not clear the Cloudflare session: ${String(error)}`);
+    } finally {
       setOauthBusy(false);
     }
   };

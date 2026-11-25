@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { StoredCredentials, WorkerLedger, UserSettings, LogEntry, HealthStatus } from "../types";
 import { HealthBanners } from "./HealthBanners";
@@ -10,6 +10,7 @@ import {
   getWorkerUrl,
   getStatusAuthKey,
   rotateAppleTokens,
+  appleGetTokens,
   loadUserSettings,
   storageClearAll,
   updatePollInterval,
@@ -17,6 +18,7 @@ import {
   appleDecodeTokenExpiry,
 } from "../lib/tauri";
 import { fetchStatus, triggerScrobble, fetchLastfmAlbumArt, resetWorkerStats } from "../lib/worker-api";
+import { recordWorkerSync, workerNeedsSync } from "../lib/worker-version";
 
 interface DashboardProps {
   creds: StoredCredentials;
@@ -31,6 +33,7 @@ interface AlbumArtCache {
 const INTERVAL_OPTIONS = [
   { value: 1, label: "1 min" },
   { value: 2, label: "2 min" },
+  { value: 3, label: "3 min" },
   { value: 5, label: "5 min" },
   { value: 10, label: "10 min" },
   { value: 15, label: "15 min" },
@@ -175,7 +178,9 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
   const [rotating, setRotating] = useState(false);
-  const [rotateError, setRotateError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [apple, setApple] = useState(creds.apple);
   const [settings, setSettings] = useState<UserSettings>({ poll_interval_minutes: 1 });
   const [confirmReset, setConfirmReset] = useState(false);
   const [subdomainMissing, setSubdomainMissing] = useState(false);
@@ -184,7 +189,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   const [showAllScrobbles, setShowAllScrobbles] = useState(false);
   const [decodedAppleExpiry, setDecodedAppleExpiry] = useState<string | null>(creds.apple?.expires_at || null);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body: string | null } | null>(null);
-  const [updateObject, setUpdateObject] = useState<any>(null);
+  const [updateObject, setUpdateObject] = useState<Update | null>(null);
   const [showUpdateNotes, setShowUpdateNotes] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [firstRunPending, setFirstRunPending] = useState(false);
@@ -194,29 +199,39 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   const [workerOutOfSync, setWorkerOutOfSync] = useState(false);
   const [syncingWorker, setSyncingWorker] = useState(false);
   const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null);
+  const workerBusy = triggering || rotating || syncingWorker;
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      setHealthStatus(await invoke<HealthStatus>("get_health_status"));
+    } catch (error) {
+      console.warn("Could not refresh app health:", error);
+    }
+  }, []);
 
   useEffect(() => {
-    invoke<HealthStatus>("get_health_status")
-      .then(setHealthStatus)
-      .catch(() => {});
-
-    let unlisten: UnlistenFn | null = null;
+    void refreshHealth();
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
     listen<HealthStatus>("health-status", (event) => {
-      setHealthStatus(event.payload);
+      if (!disposed) setHealthStatus(event.payload);
     }).then((fn) => {
-      unlisten = fn;
-    });
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch((error) => console.warn("Could not listen for health updates:", error));
 
     return () => {
-      if (unlisten) unlisten();
+      disposed = true;
+      unlisten?.();
     };
-  }, []);
+  }, [refreshHealth]);
 
   const refreshStatus = useCallback(async () => {
     if (!workerUrl || !authKey) return;
     try {
       const data = await fetchStatus(workerUrl, authKey);
       setLedger(data);
+      setFirstRunPending(!data.last_run_iso && data.stats.total_runs === 0);
       setStatusError(null);
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
@@ -237,8 +252,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
 
     const tick = () => {
       const rawDiff = Math.ceil((nextCronMs - Date.now()) / 1000);
-      // Smooth rollover: never freeze at 0
-      setCountdownSec(rawDiff > 0 ? rawDiff : (((rawDiff % 60) + 60) % 60));
+      setCountdownSec(Math.max(0, rawDiff));
     };
     tick();
     const timer = setInterval(tick, 1000);
@@ -256,7 +270,8 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
 
   // Auto-trigger a catchup poll on mount/launch if last run was > 2 minutes ago
   useEffect(() => {
-    if (!ledger?.last_run_iso || !workerUrl || !authKey) return;
+    if (!ledger?.last_run_iso || !workerUrl || !authKey || ledger.stats.last_error_message ||
+        (ledger.circuit_open_until_iso && Date.parse(ledger.circuit_open_until_iso) > Date.now())) return;
     const lastRunMs = new Date(ledger.last_run_iso).getTime();
     const gapMs = Date.now() - lastRunMs;
     const intervalMs = (settings.poll_interval_minutes || 1) * 60_000;
@@ -267,7 +282,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
         .then(() => setTimeout(refreshStatus, 2500))
         .catch(console.error);
     }
-  }, [ledger?.last_run_iso, workerUrl, authKey, settings.poll_interval_minutes, refreshStatus]);
+  }, [ledger?.last_run_iso, ledger?.stats.last_error_message, ledger?.circuit_open_until_iso, workerUrl, authKey, settings.poll_interval_minutes, refreshStatus]);
 
   // Notify parent of status changes
   useEffect(() => {
@@ -275,14 +290,16 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
     let color = "gray";
     let text = "Unknown";
     if (!ledger) { color = "gray"; text = "No data"; }
-    else if (statusError) { color = "red"; text = "Error"; }
+    else if (healthStatus?.apple_expired) { color = "red"; text = "Apple Music disconnected"; }
+    else if (statusError || ledger.stats.last_error_message) { color = "red"; text = "Error"; }
     else if (ledger.last_run_iso && Date.now() - new Date(ledger.last_run_iso).getTime() < (settings.poll_interval_minutes + 5) * 60_000) { color = "green"; text = "Running"; }
     else { color = "yellow"; text = "Stale"; }
     onStatusChange({ color, text });
-  }, [ledger, settings.poll_interval_minutes, statusError, onStatusChange]);
+  }, [ledger, settings.poll_interval_minutes, statusError, healthStatus?.apple_expired, onStatusChange]);
 
   const handleResetStats = async () => {
-    if (!workerUrl || !authKey) return;
+    if (!workerUrl || !authKey || workerBusy) return;
+    setActionError(null);
     try {
       let updated: WorkerLedger;
       try {
@@ -292,6 +309,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
         if (msg.includes("404") || msg.includes("Reset stats HTTP 404")) {
           setResetToast("Updating worker code on Cloudflare...");
           await redeployWorker();
+          recordWorkerSync();
           updated = await resetWorkerStats(workerUrl, authKey);
         } else {
           throw err;
@@ -299,12 +317,13 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
       }
       setLedger(updated);
       setStatusError(null);
-      setResetToast("Error log cleared ✓");
+      void refreshHealth();
+      setResetToast("Worker error counters cleared.");
       setTimeout(() => setResetToast(null), 3000);
     } catch (e) {
       console.error("Failed to reset worker stats:", e);
       const msg = typeof e === "string" ? e : (e as Error).message;
-      setStatusError(`Failed to clear errors: ${msg}`);
+      setActionError(`Failed to clear errors: ${msg}`);
     }
   };
 
@@ -333,7 +352,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
           return;
         }
         
-        if (url && key) {
+        if (key) {
           try {
             const data = await fetchStatus(url, key);
             setLedger(data);
@@ -344,15 +363,10 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
             }
           } catch (e) {
             const msg = typeof e === "string" ? e : (e as Error).message;
-            // If the /status endpoint fails immediately after a deploy, it
-            // likely just means the worker hasn't served its first request
-            // yet. Show a friendlier "pending" state instead of a red error.
-            if (msg?.includes("401") || msg?.includes("403") || msg?.includes("fetch")) {
-              setFirstRunPending(true);
-            } else {
-              setStatusError(msg);
-            }
+            setStatusError(msg);
           }
+        } else {
+          setStatusError("Worker access details are missing. Reconnect the Worker in setup.");
         }
 
         // Non-blocking update check — never throws into the main catch
@@ -363,16 +377,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
           }
         }).catch(() => { /* no update server configured yet, or offline */ });
 
-        // Worker-sync check: if localStorage records a different app version
-        // than the one running now, a relaunch after an update just happened.
-        // Prompt the user to redeploy so the worker code stays in sync.
-        const APP_VERSION = "1.1.3";
-        const storedWorkerSyncVersion = localStorage.getItem("ascrobble_worker_sync_version");
-        if (storedWorkerSyncVersion && storedWorkerSyncVersion !== APP_VERSION) {
-          setWorkerOutOfSync(true);
-        }
-        // Always write the current version so we detect future updates
-        localStorage.setItem("ascrobble_worker_sync_version", APP_VERSION);
+        setWorkerOutOfSync(workerNeedsSync());
       } catch (e) {
         const msg = typeof e === "string" ? e : (e as Error).message;
         console.error("Dashboard initialization error:", msg);
@@ -386,9 +391,9 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   // Decode Apple token expiry on mount if not already available
   useEffect(() => {
     (async () => {
-      if (creds.apple?.developer_token && !decodedAppleExpiry) {
+      if (apple?.developer_token && !decodedAppleExpiry) {
         try {
-          const expiry = await appleDecodeTokenExpiry(creds.apple.developer_token);
+          const expiry = await appleDecodeTokenExpiry(apple.developer_token);
           if (expiry) {
             console.log("Decoded Apple token expiry:", expiry);
             setDecodedAppleExpiry(expiry);
@@ -398,7 +403,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
         }
       }
     })();
-  }, [creds.apple?.developer_token, decodedAppleExpiry]);
+  }, [apple?.developer_token, decodedAppleExpiry]);
 
   // Smart polling is handled by the countdown effect above (idle 15s + burst around cron time)
 
@@ -407,56 +412,81 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
     if (!ledger?.recent_scrobbles || !creds.lastfm?.api_key) return;
     
     const fetchAlbumArts = async () => {
-      const newCache: AlbumArtCache = { ...albumArtCache };
+      const additions: AlbumArtCache = {};
       
       for (const scrobble of ledger.recent_scrobbles.slice(0, 20)) {
         const cacheKey = `${scrobble.artist}|${scrobble.album}`;
         
         // Skip if already in cache
-        if (cacheKey in newCache) continue;
+        if (cacheKey in albumArtCache || cacheKey in additions) continue;
         
         const art = await fetchLastfmAlbumArt(
           creds.lastfm?.api_key ?? "",
           scrobble.artist,
           scrobble.album
         );
-        newCache[cacheKey] = art;
+        additions[cacheKey] = art;
       }
       
-      setAlbumArtCache(newCache);
+      if (Object.keys(additions).length > 0) {
+        setAlbumArtCache((previous) => ({ ...previous, ...additions }));
+      }
     };
     
     fetchAlbumArts().catch(console.error);
   }, [ledger?.recent_scrobbles, creds.lastfm?.api_key, albumArtCache]);
 
   const handleTrigger = async () => {
-    if (!workerUrl || !authKey) return;
+    if (workerBusy) return;
+    setActionError(null);
+    if (!workerUrl || !authKey) {
+      setActionError("Worker access details are missing. Reconnect the Worker in setup.");
+      return;
+    }
     setTriggering(true);
     try {
       const res = await triggerScrobble(workerUrl, authKey);
       if (res?.ledger) {
         setLedger(res.ledger);
         setStatusError(null);
+        setFirstRunPending(!res.ledger.last_run_iso && res.ledger.stats.total_runs === 0);
       } else {
         await refreshStatus();
       }
+      const runError = res.error ?? (res.ledger?.history_recovery_notice ? null : res.ledger?.stats.last_error_message);
+      if (!res.ok || runError) {
+        const error = runError === "apple_token_expired"
+          ? "Apple Music rejected the saved tokens. Rotate them to resume polling."
+          : runError || "The Worker could not complete the poll.";
+        setActionError(error);
+      } else if (!res.ledger?.history_recovery_notice) {
+        setResetToast("Worker poll requested.");
+        setTimeout(() => setResetToast(null), 3000);
+      }
+      void refreshHealth();
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
-      setStatusError(msg);
+      setActionError(msg);
     } finally {
       setTriggering(false);
     }
   };
 
   const handleRotate = async () => {
-    if (!creds.cloudflare_account_id) return;
+    if (workerBusy) return;
     setRotating(true);
-    setRotateError(null);
+    setActionError(null);
     try {
       await rotateAppleTokens(creds.cloudflare_account_id);
+      setResetToast("Apple Music tokens updated.");
+      setTimeout(() => setResetToast(null), 4000);
+      const updated = await appleGetTokens();
+      setApple(updated);
+      setDecodedAppleExpiry(updated?.expires_at ?? null);
+      await Promise.all([refreshStatus(), refreshHealth()]);
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
-      setRotateError(msg);
+      setActionError(`Apple Music reconnect failed: ${msg}`);
     } finally {
       setRotating(false);
     }
@@ -464,18 +494,13 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
 
   const handlePollIntervalChange = async (newInterval: number) => {
     setUpdatingSettings(true);
+    setActionError(null);
     try {
       await updatePollInterval(newInterval);
-      setSettings({ poll_interval_minutes: newInterval });
-      
-      const saved = localStorage.getItem("ascrobble_settings") || localStorage.getItem("ascrobble-settings");
-      const parsed = saved ? JSON.parse(saved) : {};
-      parsed.pollingInterval = newInterval;
-      parsed.poll_interval_minutes = newInterval;
-      localStorage.setItem("ascrobble_settings", JSON.stringify(parsed));
+      setSettings((previous) => ({ ...previous, poll_interval_minutes: newInterval }));
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
-      setStatusError(`Failed to update settings: ${msg}`);
+      setActionError(`Could not change the polling interval: ${msg}`);
     } finally {
       setUpdatingSettings(false);
     }
@@ -490,70 +515,84 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
       await storageClearAll();
       onReset();
     } catch (e) {
-      console.error("clear failed:", e);
+      setActionError(`Could not reset credentials: ${String(e)}`);
     }
   };
 
   const handleInstallUpdate = async () => {
     if (!updateObject) return;
     setInstalling(true);
+    setUpdateError(null);
     try {
-      // Clear the sync version so after relaunch we prompt to redeploy worker
-      localStorage.removeItem("ascrobble_worker_sync_version");
       await updateObject.downloadAndInstall();
       await relaunch();
     } catch (e) {
-      console.error("Update install failed:", e);
+      setUpdateError(`Update failed: ${String(e)}`);
       setInstalling(false);
     }
   };
 
   const handleSyncWorker = async () => {
+    if (workerBusy) return;
     setSyncingWorker(true);
+    setActionError(null);
     try {
       await redeployWorker();
+      recordWorkerSync();
       setWorkerOutOfSync(false);
-      setResetToast("Worker synced to v1.1.0 ✓");
+      setResetToast("Worker code synced to Cloudflare.");
       setTimeout(() => setResetToast(null), 4000);
-      // Refresh status after redeploy
-      setTimeout(refreshStatus, 3000);
+      const [url, key] = await Promise.all([getWorkerUrl(), getStatusAuthKey()]);
+      setWorkerUrl(url);
+      setAuthKey(key);
+      setSubdomainMissing(!url);
+      if (url && key) {
+        const data = await fetchStatus(url, key);
+        setLedger(data);
+        setFirstRunPending(!data.last_run_iso && data.stats.total_runs === 0);
+        setStatusError(null);
+      }
+      await refreshHealth();
     } catch (e) {
       console.error("Worker sync failed:", e);
       const msg = typeof e === "string" ? e : (e as Error).message;
-      setStatusError(`Worker sync failed: ${msg}`);
+      setActionError(`Worker sync failed: ${msg}`);
     } finally {
       setSyncingWorker(false);
     }
   };
 
+  const openLink = (url: string) => {
+    setActionError(null);
+    open(url).catch((error) => setActionError(`Could not open the browser: ${String(error)}`));
+  };
+
   const openLastfmProfile = () => {
     if (!creds.lastfm) return;
-    open(`https://www.last.fm/user/${creds.lastfm.username}`).catch(console.error);
+    openLink(`https://www.last.fm/user/${encodeURIComponent(creds.lastfm.username)}`);
   };
 
   const openAppleMusic = () => {
-    open("https://music.apple.com").catch(console.error);
+    openLink("https://music.apple.com");
   };
 
   const openCloudflareDashboard = () => {
-    if (!creds.cloudflare_account_id) return;
-    open(
-      `https://dash.cloudflare.com/${creds.cloudflare_account_id}/workers/services/view/ascrobble-scrobbler/production`
-    ).catch(console.error);
+    openLink(creds.cloudflare_account_id
+      ? `https://dash.cloudflare.com/${creds.cloudflare_account_id}/workers/services/view/ascrobble-scrobbler/production`
+      : "https://dash.cloudflare.com/");
   };
 
   const openSubdomainSetup = () => {
-    if (!creds.cloudflare_account_id) return;
-    open(
-      `https://dash.cloudflare.com/${creds.cloudflare_account_id}/workers`
-    ).catch(console.error);
+    openLink(creds.cloudflare_account_id
+      ? `https://dash.cloudflare.com/${creds.cloudflare_account_id}/workers`
+      : "https://dash.cloudflare.com/");
   };
 
   const openLastfmTrack = (scrobble: any) => {
     const artist = encodeURIComponent(scrobble.artist);
     const track = encodeURIComponent(scrobble.track);
     const url = `https://www.last.fm/music/${artist}/_/${track}`;
-    open(url).catch(console.error);
+    openLink(url);
   };
 
 
@@ -573,7 +612,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   
   const statusDot = !ledger
     ? "gray"
-    : circuitOpen || statusError
+    : circuitOpen || statusError || healthStatus?.apple_expired || stats?.last_error_message
       ? "red"
       : firstRunPending
         ? "yellow"
@@ -582,15 +621,26 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
   return (
     <div className="dashboard">
       {resetToast && (
-        <div className="toast">
+        <div className="toast" role="status">
           {resetToast}
         </div>
+      )}
+      {actionError && <div className="status status-error" role="alert">{actionError}</div>}
+      {rotating && (
+        <p className="hint" role="status">
+          Sign in in the Apple Music window. If it opens already signed in, sign out there and sign in again.
+        </p>
       )}
       {/* Health / Alert Banners */}
       <HealthBanners
         status={healthStatus}
+        busy={workerBusy}
+        rotating={rotating}
+        syncing={syncingWorker}
+        retrying={triggering}
         onRotateApple={handleRotate}
         onFixWorker={handleSyncWorker}
+        onRetryWorker={handleTrigger}
       />
       {/* App update banner */}
       {updateAvailable && (
@@ -613,13 +663,14 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
             >
               {installing ? "⏳ Installing…" : "⬇ Install & relaunch"}
             </button>
-            <button
+            {updateAvailable.body && <button
               className="update-notes-toggle"
               onClick={() => setShowUpdateNotes(v => !v)}
             >
               {showUpdateNotes ? "▲ Hide" : "▼ What's new"}
-            </button>
+            </button>}
           </div>
+          {updateError && <div className="status status-error" role="alert">{updateError}</div>}
           {showUpdateNotes && updateAvailable.body && (
             <div className="update-notes-box">
               {updateAvailable.body
@@ -661,7 +712,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
               <button
                 className="btn btn-primary"
                 onClick={handleSyncWorker}
-                disabled={syncingWorker}
+                disabled={workerBusy}
                 style={{ whiteSpace: "nowrap", background: "linear-gradient(135deg, #f59e0b, #d97706)" }}
               >
                 {syncingWorker ? "Syncing..." : "Sync Worker"}
@@ -840,15 +891,19 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
               <button
                 className="link-btn"
                 onClick={handleResetStats}
+                disabled={workerBusy}
                 style={{ fontSize: 11, opacity: 0.7, textDecoration: "underline", color: "#fc3c44" }}
-                title="Reset total error counters and clear error log"
+                title="Reset worker error counters"
               >
-                Clear error log
+                Clear errors
               </button>
             )}
           </div>
         )}
 
+        {ledger?.history_recovery_notice && (
+          <p className="hint" role="status">{ledger.history_recovery_notice}</p>
+        )}
         {firstRunPending && !ledger?.last_run_iso && (
           <div className="status" style={{ marginTop: 12, background: "rgba(251,191,36,0.07)", borderColor: "rgba(251,191,36,0.2)" }}>
             <span className="status-icon" style={{ color: "#fbbf24" }}>◐</span>
@@ -862,7 +917,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
                 className="btn btn-secondary"
                 style={{ marginTop: 10, fontSize: 12 }}
                 onClick={handleTrigger}
-                disabled={triggering}
+                disabled={workerBusy}
               >
                 {triggering ? "Running..." : "Run now instead"}
               </button>
@@ -922,7 +977,7 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
                   className="btn btn-secondary"
                   style={{ fontSize: 10, padding: "2px 8px", height: "auto" }}
                   onClick={handleTrigger}
-                  disabled={triggering}
+                  disabled={workerBusy}
                 >
                   {triggering ? "Running..." : "Run now to populate"}
                 </button>
@@ -1086,8 +1141,8 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
       )}
 
       {/* Token Expiry Card */}
-      {creds.apple && (() => {
-        const days = daysUntilExpiry(creds.apple.captured_at, decodedAppleExpiry);
+      {apple && (() => {
+        const days = daysUntilExpiry(apple.captured_at, decodedAppleExpiry);
         const expiring = days < 30;
         return (
           <div className="card" style={expiring ? { border: "1px solid rgba(251,191,36,0.4)" } : undefined}>
@@ -1106,14 +1161,14 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
             <div className="summary" style={{ margin: "12px 0" }}>
               <div className="summary-row">
                 <span className="summary-label">Captured</span>
-                <span>{new Date(creds.apple.captured_at).toLocaleDateString()}</span>
+                <span>{new Date(apple.captured_at).toLocaleDateString()}</span>
               </div>
               <div className="summary-row">
                 <span className="summary-label">
                   {decodedAppleExpiry ? "Token expires" : "Estimated expiry"}
                 </span>
                 <span style={{ color: expiring ? "#fbbf24" : undefined }}>
-                  {daysUntilExpiry(creds.apple.captured_at, decodedAppleExpiry)} days remaining
+                  {days} days remaining
                   {decodedAppleExpiry && (
                     <span className="meta" style={{ marginLeft: 8, fontSize: 12 }}>
                       (from JWT)
@@ -1126,17 +1181,11 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
               <button
                 className="btn btn-secondary"
                 onClick={handleRotate}
-                disabled={rotating}
+                disabled={workerBusy}
               >
                 {rotating ? "Rotating..." : "Rotate now"}
               </button>
             </div>
-            {rotateError && (
-              <div className="status status-error" style={{ marginTop: 12 }}>
-                <span className="status-icon">!</span>
-                <div>{rotateError}</div>
-              </div>
-            )}
           </div>
         );
       })()}
@@ -1171,13 +1220,13 @@ export function Dashboard({ creds, onReset, onStatusChange }: DashboardProps) {
           </div>
         </div>
         <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
-          Changes are saved immediately. The worker will use the new interval on next deployment or restart.
+          Changing this updates the Worker’s Cloudflare schedule.
         </p>
         <div className="actions" style={{ marginTop: 12 }}>
           <button
             className="btn btn-primary"
             onClick={handleTrigger}
-            disabled={triggering || !workerUrl || !authKey}
+            disabled={workerBusy || !workerUrl || !authKey}
           >
             {triggering ? "Triggering..." : "Trigger scrobble now"}
           </button>

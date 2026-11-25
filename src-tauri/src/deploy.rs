@@ -32,7 +32,7 @@ const WORKER_NAME: &str = "ascrobble-scrobbler";
 const KV_NAMESPACE_TITLE: &str = "ascrobble-state";
 const KV_BINDING_NAME: &str = "ASCROBBLE_STATE";
 const COMPAT_DATE: &str = "2025-04-01";
-const VALID_INTERVALS: &[u32] = &[1, 2, 3, 5, 10, 15, 30];
+pub(crate) const VALID_INTERVALS: &[u32] = &[1, 2, 3, 5, 10, 15, 30];
 const TOTAL_STEPS: u32 = 9;
 
 // KV key names — MUST match worker/src/kv_keys.ts
@@ -438,6 +438,7 @@ async fn upload_worker_script(
     let metadata = json!({
         "main_module": "worker.js",
         "compatibility_date": COMPAT_DATE,
+        "keep_bindings": ["secret_text", "secret_key", "plain_text", "json"],
         // Note: no "nodejs_compat" flag — the bundled worker uses pure-TS
         // MD5 and doesn't depend on any Node built-ins.
         "bindings": [
@@ -823,9 +824,8 @@ async fn warmup_worker(
 /// confirming that Cloudflare has propagated the STATUS_AUTH_KEY secret to
 /// all edge nodes. Without this, the dashboard's first request gets a 401.
 ///
-/// Returns Err immediately on 404 — that means the worker upload failed or
-/// the worker was deleted, not a propagation delay. Returns Ok on timeout
-/// so a slow network doesn't block an otherwise successful deploy.
+/// Wait for the route and authentication to work before reporting that the
+/// Worker is ready.
 async fn await_secret_propagation(worker_url: &str, auth_key: &str) -> Result<()> {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(6))
@@ -838,7 +838,7 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) -> Result<()
         }
     };
 
-    let status_url = format!("{}/status?key={}", worker_url, auth_key);
+    let status_url = format!("{worker_url}/status");
 
     // On a fresh deploy the workers.dev route itself needs a few seconds to
     // become routable after enable_workers_dev_route() is called, so the first
@@ -847,7 +847,7 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) -> Result<()
     let mut consecutive_404s: u32 = 0;
 
     for attempt in 1..=20 {
-        match client.get(&status_url).send().await {
+        match client.get(&status_url).header("x-ascrobble-auth", auth_key).send().await {
             Ok(resp) if resp.status().as_u16() == 200 => {
                 log::info!(
                     "Worker ready: STATUS_AUTH_KEY propagated after {} attempt(s)",
@@ -889,11 +889,9 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) -> Result<()
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
-    log::warn!(
-        "Secret propagation timed out after 40s. \
-         The worker is deployed; the dashboard may show a brief error on first load."
-    );
-    Ok(())
+    Err(anyhow!(
+        "Worker code was uploaded, but Cloudflare did not confirm that the dashboard can access it. Refresh its status or try syncing again."
+    ))
 }
 
 // ---------- Worker URL resolution ----------
@@ -952,9 +950,35 @@ async fn resolve_worker_url(
 
 /// Rotate Apple tokens in KV without a full redeploy.
 pub async fn rotate_apple_tokens(
-    account_id: &str,
+    account_id: Option<&str>,
     apple: &crate::commands::AppleTokens,
 ) -> Result<()> {
+    if let (Some(worker_url), Some(auth_key)) =
+        (storage::load_worker_url()?, storage::load_status_auth_key()?)
+    {
+        // Updating through the Worker also clears its cooldown and preserves
+        // its history checkpoint so the next scheduled poll can recover.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let response = client
+            .post(format!("{}/update-tokens", worker_url))
+            .header("x-ascrobble-auth", auth_key)
+            .json(&json!({
+                "apple_dev_token": apple.developer_token,
+                "apple_user_token": apple.music_user_token,
+            }))
+            .send()
+            .await;
+        if response.is_ok_and(|response| response.status().is_success()) {
+            return Ok(());
+        }
+        log::warn!("Worker token update unavailable, using Cloudflare KV");
+    }
+
+    let account_id = account_id
+        .ok_or_else(|| anyhow!("Reconnect Cloudflare in setup to update the Worker's Apple Music tokens."))?;
     let token = resolve_cloudflare_api_token().await?;
     let client = build_client();
 
@@ -983,9 +1007,40 @@ pub async fn redeploy_worker_script(app: &AppHandle) -> Result<()> {
         .map(|s| s.poll_interval_minutes)
         .unwrap_or(1);
     let cron_expr = format!("*/{} * * * *", poll_interval);
-    let _ = set_cron_schedule(&client, &token, &account_id, &cron_expr).await;
+    set_cron_schedule(&client, &token, &account_id, &cron_expr).await?;
 
-    Ok(())
+    let worker_url = resolve_worker_url(&client, &token, &account_id).await?
+        .ok_or_else(|| anyhow!("Set up the account’s workers.dev subdomain to reconnect the dashboard."))?;
+    storage::save_worker_url(&worker_url)?;
+    let existing_key = storage::load_status_auth_key()?;
+    let auth_key = existing_key.clone().unwrap_or_else(generate_status_auth_key);
+    let status = client.get(format!("{worker_url}/status"))
+        .header("x-ascrobble-auth", &auth_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    if status.as_ref().is_ok_and(|response| response.status().is_success()) {
+        return Ok(());
+    }
+
+    // Older syncs could drop the original credentials. Restore the required
+    // secrets only when the Worker rejects the saved access key.
+    let repair_credentials = match status {
+        Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => true,
+        Ok(response) if response.status() == reqwest::StatusCode::INTERNAL_SERVER_ERROR => {
+            response.json::<serde_json::Value>().await.ok()
+                .and_then(|body| body.get("error").and_then(serde_json::Value::as_str).map(str::to_owned))
+                .is_some_and(|error| error.contains("STATUS_AUTH_KEY not set"))
+        }
+        _ => existing_key.is_none(),
+    };
+    if repair_credentials {
+        let lastfm = storage::load_lastfm_session()?
+            .ok_or_else(|| anyhow!("Reconnect Last.fm in setup to restore the Worker's credentials."))?;
+        set_all_secrets(&client, &token, &account_id, &lastfm, &auth_key, None, None).await?;
+        storage::save_status_auth_key(&auth_key)?;
+    }
+    await_secret_propagation(&worker_url, &auth_key).await
 }
 
 // ---------- Status query ----------

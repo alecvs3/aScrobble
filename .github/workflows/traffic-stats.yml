@@ -8,6 +8,11 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: traffic-stats
+  cancel-in-progress: false
 
 jobs:
   stats:
@@ -17,5 +22,14 @@ jobs:
         uses: jgehrcke/github-repo-stats@v1.4.2
         with:
           ghtoken: ${{ secrets.GHRS_GITHUB_API_TOKEN || secrets.GITHUB_TOKEN }}
-          ghpagesprefix: https://ThisCrashesYouOnPhone.github.io/aScrobble
+          ghpagesprefix: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+      - name: Archive clone context and release asset counts
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${GITHUB_REPOSITORY}/contents/scripts/traffic-attribution.mjs?ref=${GITHUB_SHA}" \
+            > "${RUNNER_TEMP}/traffic-attribution.mjs"
+          node "${RUNNER_TEMP}/traffic-attribution.mjs"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAFFIC_TOKEN: ${{ secrets.GHRS_GITHUB_API_TOKEN || secrets.GITHUB_TOKEN }}
 
