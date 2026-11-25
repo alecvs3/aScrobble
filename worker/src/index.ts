@@ -56,7 +56,7 @@ export default {
     // Lightweight health check — always open, no auth needed
     if (url.pathname === "/health") {
       return json(
-        { ok: true, service: "aScrobble-scrobbler", version: "0.3.0" },
+        { ok: true, service: "aScrobble-scrobbler", version: "0.4.0" },
         200,
         corsHeaders
       );

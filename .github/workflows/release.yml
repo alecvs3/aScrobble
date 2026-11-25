@@ -85,33 +85,32 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'aScrobble ${{ github.ref_name }}'
           releaseBody: |
-            ## What's new in v1.1
+            ## What's new in v1.1.4
 
-            ### 🔄 In-App Auto-Update
-            aScrobble now checks for new versions on every launch. A banner appears in the Dashboard when an update is available — click **Install & relaunch** to update silently in the background. Completely optional; you can dismiss it and update later.
+            ### 📚 Songs played from your library are scrobbled
+            Apple Music keeps plays from your library in a separate list, and the worker only read the catalog list. Every song you played from your library was skipped. The worker now reads both lists. Switching over doesn't re-scrobble anything you've already heard.
 
-            ### ☁️ Worker Sync After Update
-            After the app restarts post-update, a prompt appears if your deployed Cloudflare Worker is out of date. One click resyncs it so new worker features (like `/update-tokens` and `/clear-cache`) are immediately available.
+            ### 🛟 Outage recovery
+            If the worker can't reach Apple Music for a while (an expired token, an outage), it finds where your saved history picks up again and backfills the plays it missed, with estimated timestamps. This works for gaps under 13 days, since Last.fm doesn't accept plays older than 14 days. The dashboard shows how recovery is going.
 
-            ### 🔑 Token Rotation Without Redeployment (`POST /update-tokens`)
-            Rotate your Apple Music tokens directly from the Dashboard — or hit the endpoint manually — without touching the CLI or redeploying the whole worker.
+            ### 🔁 No more lost scrobbles when Last.fm hiccups
+            Plays Last.fm doesn't confirm are queued with their original timestamps and resent on the next poll, instead of being dropped.
 
-            ### 🧹 Granular Cache Management (`POST /clear-cache`)
-            Clear the history snapshot, dedup guard, circuit breaker state, or log entries independently via JSON flags. No more full wipes when you just want to reset one thing.
+            ### 🔐 Safer worker connection
+            The app now sends the worker's access key in a header instead of the URL, and manual polls, stats resets and status checks all go through the app. Apple token rotation goes through the worker first, so it also clears any cooldown and keeps the recovery checkpoint.
 
-            ### 🏗️ Cross-Platform Build Pipeline
-            Releases now ship native installers for all three platforms built in CI:
-            - **Windows** — `.exe` (NSIS installer)
-            - **macOS** — `.dmg` (universal binary: Intel + Apple Silicon)
-            - **Linux** — `.deb` + `.AppImage`
-
-            ### 🐛 Fixes
-            - Typecheck fixes in `detect.ts` and `index.ts` (unused parameter prefixes).
-            - Unit tests updated to match the `{ plays, newState }` return shape of `detectPlays()`.
-            - Worker `/health` version bumped to `0.3.0`.
+            ### 🧰 Other fixes
+            - Removed the library play-count check. Apple rejects it, so it never worked and cost one extra request per poll.
+            - Changing the polling interval now reports an error if Cloudflare rejects it, instead of silently keeping the old schedule.
+            - Syncing the worker repairs its saved credentials when it no longer accepts the app's access key, and reports an error if the worker never confirms it's ready.
+            - Apple Music sign-in can't be opened twice, and closing its window cancels cleanly.
+            - Saved credentials are written atomically, and errors saving them are reported.
+            - New setting to turn off desktop notifications.
+            - Apple token expiry now counts the final partial day correctly.
+            - Removed a debug command that could copy your Apple tokens.
 
             ---
-            **⚠️ GitHub Actions secret required:** Add your `TAURI_SIGNING_PRIVATE_KEY` to repository secrets before pushing a release tag.
+            **After updating:** the dashboard asks you to sync your Cloudflare Worker. Click it once so the worker gets these fixes.
 
             See the assets below to download and install.
           releaseDraft: false

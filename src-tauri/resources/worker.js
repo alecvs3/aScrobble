@@ -1297,7 +1297,7 @@ var index_default = {
     }
     if (url.pathname === "/health") {
       return json(
-        { ok: true, service: "aScrobble-scrobbler", version: "0.3.0" },
+        { ok: true, service: "aScrobble-scrobbler", version: "0.4.0" },
         200,
         corsHeaders
       );
