@@ -7,4 +7,4 @@
 **Latest report PDF**: [report.pdf](https://github.com/alecvs3/aScrobble/raw/github-repo-stats/alecvs3/aScrobble/latest-report/report.pdf)
 
 
-**Latest report HTML via GitHub pages**: [report.html](https://ThisCrashesYouOnPhone.github.io/aScrobble/alecvs3/aScrobble/latest-report/report.html)
+**Latest report HTML via GitHub pages**: [report.html](https://alecvs3.github.io/aScrobble/alecvs3/aScrobble/latest-report/report.html)
