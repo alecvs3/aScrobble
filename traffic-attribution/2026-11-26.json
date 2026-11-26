@@ -1,0 +1,447 @@
+{
+  "capturedAt": "2026-11-26T04:33:26.751Z",
+  "repository": "alecvs3/aScrobble",
+  "traffic": {
+    "clones": 138,
+    "uniqueCloners": 74,
+    "views": 20,
+    "uniqueVisitors": 13,
+    "daily": [
+      {
+        "date": "2026-11-11",
+        "clones": 17,
+        "uniqueCloners": 9,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-12",
+        "clones": 3,
+        "uniqueCloners": 3,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-13",
+        "clones": 10,
+        "uniqueCloners": 6,
+        "views": 5,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-14",
+        "clones": 6,
+        "uniqueCloners": 6,
+        "views": 2,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-15",
+        "clones": 5,
+        "uniqueCloners": 5,
+        "views": 3,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-16",
+        "clones": 2,
+        "uniqueCloners": 2,
+        "views": 3,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-17",
+        "clones": 41,
+        "uniqueCloners": 20,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-18",
+        "clones": 4,
+        "uniqueCloners": 4,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-19",
+        "clones": 4,
+        "uniqueCloners": 4,
+        "views": 3,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-20",
+        "clones": 16,
+        "uniqueCloners": 9,
+        "views": 1,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-21",
+        "clones": 6,
+        "uniqueCloners": 5,
+        "views": 1,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-22",
+        "clones": 2,
+        "uniqueCloners": 2,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-23",
+        "clones": 5,
+        "uniqueCloners": 5,
+        "views": 0,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      },
+      {
+        "date": "2026-11-24",
+        "clones": 17,
+        "uniqueCloners": 11,
+        "views": 2,
+        "workflowRuns": 2,
+        "workflowRunsByName": {
+          "pages build and deployment": 1,
+          "Traffic & Repo Analytics": 1
+        },
+        "newPublicForks": 0,
+        "releasesPublished": 0
+      }
+    ],
+    "pageReferrers": [
+      {
+        "referrer": "Google",
+        "count": 5,
+        "uniques": 5
+      },
+      {
+        "referrer": "github.com",
+        "count": 2,
+        "uniques": 2
+      },
+      {
+        "referrer": "reddit.com",
+        "count": 2,
+        "uniques": 2
+      }
+    ]
+  },
+  "releaseAssets": [
+    {
+      "id": 791614221,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_amd64.AppImage",
+      "downloads": 2
+    },
+    {
+      "id": 791614487,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_amd64.AppImage.sig",
+      "downloads": 1
+    },
+    {
+      "id": 791614127,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_amd64.deb",
+      "downloads": 2
+    },
+    {
+      "id": 791614185,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_amd64.deb.sig",
+      "downloads": 1
+    },
+    {
+      "id": 791625051,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_universal.dmg",
+      "downloads": 1
+    },
+    {
+      "id": 791614298,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_x64-setup.exe",
+      "downloads": 3
+    },
+    {
+      "id": 791614378,
+      "release": "v1.1.4",
+      "name": "aScrobble_1.1.4_x64-setup.exe.sig",
+      "downloads": 1
+    },
+    {
+      "id": 791614602,
+      "release": "v1.1.4",
+      "name": "latest.json",
+      "downloads": 8
+    },
+    {
+      "id": 526746871,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_amd64.AppImage",
+      "downloads": 33
+    },
+    {
+      "id": 526746893,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_amd64.AppImage.sig",
+      "downloads": 3
+    },
+    {
+      "id": 526746855,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_amd64.deb",
+      "downloads": 6
+    },
+    {
+      "id": 526746865,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_amd64.deb.sig",
+      "downloads": 4
+    },
+    {
+      "id": 526747683,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_universal.dmg",
+      "downloads": 26
+    },
+    {
+      "id": 526749504,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_x64-setup.exe",
+      "downloads": 53
+    },
+    {
+      "id": 526749511,
+      "release": "v1.1.3",
+      "name": "aScrobble_1.1.3_x64-setup.exe.sig",
+      "downloads": 5
+    },
+    {
+      "id": 526749519,
+      "release": "v1.1.3",
+      "name": "latest.json",
+      "downloads": 530
+    },
+    {
+      "id": 525712389,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_amd64.AppImage",
+      "downloads": 2
+    },
+    {
+      "id": 525712437,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_amd64.AppImage.sig",
+      "downloads": 2
+    },
+    {
+      "id": 525712368,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_amd64.deb",
+      "downloads": 2
+    },
+    {
+      "id": 525712379,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_amd64.deb.sig",
+      "downloads": 2
+    },
+    {
+      "id": 525713127,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_universal.dmg",
+      "downloads": 5
+    },
+    {
+      "id": 525712574,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_x64-setup.exe",
+      "downloads": 8
+    },
+    {
+      "id": 525712586,
+      "release": "v1.1.2",
+      "name": "aScrobble_1.1.2_x64-setup.exe.sig",
+      "downloads": 3
+    },
+    {
+      "id": 525712595,
+      "release": "v1.1.2",
+      "name": "latest.json",
+      "downloads": 24
+    },
+    {
+      "id": 525687183,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_amd64.AppImage",
+      "downloads": 2
+    },
+    {
+      "id": 525687222,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_amd64.AppImage.sig",
+      "downloads": 2
+    },
+    {
+      "id": 525687157,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_amd64.deb",
+      "downloads": 2
+    },
+    {
+      "id": 525687170,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_amd64.deb.sig",
+      "downloads": 2
+    },
+    {
+      "id": 525687939,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_universal.dmg",
+      "downloads": 2
+    },
+    {
+      "id": 525688197,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_x64-setup.exe",
+      "downloads": 4
+    },
+    {
+      "id": 525688205,
+      "release": "v1.1.1",
+      "name": "aScrobble_1.1.1_x64-setup.exe.sig",
+      "downloads": 2
+    },
+    {
+      "id": 525688221,
+      "release": "v1.1.1",
+      "name": "latest.json",
+      "downloads": 9
+    },
+    {
+      "id": 525440193,
+      "release": "v1.1.0",
+      "name": "aScrobble_1.1.0_amd64.AppImage",
+      "downloads": 3
+    },
+    {
+      "id": 525440184,
+      "release": "v1.1.0",
+      "name": "aScrobble_1.1.0_amd64.deb",
+      "downloads": 2
+    },
+    {
+      "id": 525441103,
+      "release": "v1.1.0",
+      "name": "aScrobble_1.1.0_universal.dmg",
+      "downloads": 5
+    },
+    {
+      "id": 525440619,
+      "release": "v1.1.0",
+      "name": "aScrobble_1.1.0_x64-setup.exe",
+      "downloads": 5
+    },
+    {
+      "id": 393486387,
+      "release": "v1",
+      "name": "aScrobble_1.0.0_aarch64.dmg",
+      "downloads": 20
+    },
+    {
+      "id": 393487808,
+      "release": "v1",
+      "name": "aScrobble_1.0.0_x64-setup.exe",
+      "downloads": 21
+    },
+    {
+      "id": 393485625,
+      "release": "v1",
+      "name": "aScrobble_1.0.0_x64.dmg",
+      "downloads": 14
+    }
+  ]
+}
